@@ -160,3 +160,42 @@ PYTHONPATH=src python3 -m xbookmarks.cli --db data/real-v4.sqlite export-html \
 确认 20 条效果没问题后，再去掉 `--limit` 跑完整 `General`。
 
 如果当前模型较慢，先用更小模型测试，例如 `qwen2.5:3b` 或 `llama3.2:3b`。
+
+### 调用远端 Ollama
+
+远端机器需要让 Ollama 监听非 loopback 地址。示例：
+
+```bash
+OLLAMA_HOST=0.0.0.0:11434 ollama serve
+ollama pull qwen2.5:7b
+```
+
+客户端先检查连通性和模型是否存在：
+
+```bash
+export OLLAMA_BASE_URL=http://192.168.31.10:11434
+export OLLAMA_MODEL=qwen2.5:7b
+export OLLAMA_TIMEOUT=180
+PYTHONPATH=src python3 -m xbookmarks.cli ollama-check
+```
+
+确认 `status=available` 后再分类：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli --db data/real-v4.sqlite classify \
+  --provider ollama \
+  --only-category General \
+  --limit 20
+```
+
+也可以不使用环境变量，直接传参数：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli --db data/real-v4.sqlite classify \
+  --provider ollama \
+  --ollama-url http://192.168.31.10:11434 \
+  --ollama-model qwen2.5:7b \
+  --ollama-timeout 180 \
+  --only-category General \
+  --limit 20
+```

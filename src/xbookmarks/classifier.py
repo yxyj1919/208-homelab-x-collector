@@ -61,6 +61,27 @@ class OllamaClassifier:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
 
+    def check(self) -> list[str]:
+        request = urllib.request.Request(f"{self.base_url}/api/tags", method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except (TimeoutError, socket.timeout) as exc:
+            raise RuntimeError(
+                f"Ollama check timed out after {self.timeout_seconds} seconds"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Ollama check failed: {exc}") from exc
+
+        models = body.get("models") or []
+        if not isinstance(models, list):
+            raise RuntimeError("Ollama tags response did not contain a model list")
+        return [
+            str(model.get("name")).strip()
+            for model in models
+            if isinstance(model, dict) and str(model.get("name") or "").strip()
+        ]
+
     def classify(self, text: str) -> ClassificationResult:
         prompt = self._build_prompt(text)
         payload = json.dumps(

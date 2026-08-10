@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,9 @@ from .storage import BookmarkStore
 
 DEFAULT_DB = Path("data/bookmarks.sqlite")
 DEFAULT_ARCHIVE = Path("archive")
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_MODEL = "qwen2.5:7b"
+DEFAULT_OLLAMA_TIMEOUT = 180
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     benchmark_parser.add_argument("--limit", type=int, default=5)
     benchmark_parser.add_argument("--only-category")
     _add_provider_args(benchmark_parser)
+
+    ollama_check_parser = subparsers.add_parser("ollama-check")
+    _add_ollama_args(ollama_check_parser)
 
     set_category_parser = subparsers.add_parser("set-category")
     set_category_parser.add_argument("tweet_id")
@@ -152,6 +159,28 @@ def main(argv: list[str] | None = None) -> int:
             f"avg_seconds={result['avg_seconds']:.2f} "
             f"provider={args.provider} model={args.ollama_model if args.provider == 'ollama' else 'rules'}"
         )
+        return 0
+
+    if args.command == "ollama-check":
+        classifier = OllamaClassifier(
+            categories=["General"],
+            model=args.ollama_model,
+            base_url=args.ollama_url,
+            timeout_seconds=args.ollama_timeout,
+        )
+        models = classifier.check()
+        if args.ollama_model in models:
+            status = "available"
+        else:
+            status = "missing"
+        print(
+            f"Ollama reachable: url={args.ollama_url} "
+            f"model={args.ollama_model} status={status}"
+        )
+        if models:
+            print("Models:")
+            for model in models:
+                print(f"- {model}")
         return 0
 
     if args.command == "set-category":
@@ -244,9 +273,32 @@ def main(argv: list[str] | None = None) -> int:
 
 def _add_provider_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--provider", choices=("rules", "ollama"), default="rules")
-    parser.add_argument("--ollama-model", default="qwen2.5:7b")
-    parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
-    parser.add_argument("--ollama-timeout", type=int, default=180)
+    _add_ollama_args(parser)
+
+
+def _add_ollama_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--ollama-model", default=_env("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
+    parser.add_argument("--ollama-url", default=_env("OLLAMA_BASE_URL", DEFAULT_OLLAMA_URL))
+    parser.add_argument(
+        "--ollama-timeout",
+        type=int,
+        default=_env_int("OLLAMA_TIMEOUT", DEFAULT_OLLAMA_TIMEOUT),
+    )
+
+
+def _env(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    return value.strip() if value and value.strip() else default
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if not value or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def _classify(

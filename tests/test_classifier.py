@@ -3,9 +3,10 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from xbookmarks.classifier import OllamaClassifier, RuleBasedClassifier
-from xbookmarks.cli import main
+from xbookmarks.cli import _build_classifier, main
 from xbookmarks.config import (
     category_config_for_interests,
     load_category_config,
@@ -98,6 +99,41 @@ class OllamaClassifierTest(unittest.TestCase):
 
         self.assertIn("Tools: Software tools and browser extensions.", prompt)
         self.assertIn("Productivity: Workflows and information management.", prompt)
+
+    def test_build_classifier_uses_remote_ollama_url(self) -> None:
+        classifier = _build_classifier(
+            provider="ollama",
+            definitions=category_config_for_interests(["ai"]),
+            ollama_model="qwen2.5:7b",
+            ollama_url="http://192.168.31.10:11434/",
+            ollama_timeout=30,
+        )
+
+        self.assertIsInstance(classifier, OllamaClassifier)
+        self.assertEqual(classifier.base_url, "http://192.168.31.10:11434")
+        self.assertEqual(classifier.timeout_seconds, 30)
+
+    def test_ollama_check_command_reports_available_model(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "bookmarks.sqlite"
+            with patch.object(
+                OllamaClassifier,
+                "check",
+                return_value=["qwen2.5:7b", "llama3.2:3b"],
+            ):
+                exit_code = main(
+                    [
+                        "--db",
+                        str(db),
+                        "ollama-check",
+                        "--ollama-url",
+                        "http://192.168.31.10:11434",
+                        "--ollama-model",
+                        "qwen2.5:7b",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
 
 
 class CategoryConfigTest(unittest.TestCase):
