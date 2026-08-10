@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "homelab-x-collector"
+version = "0.1.0"
+description = "Local-first X/Twitter bookmark archiver with SQLite storage and HTML export."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "changw" }]
+dependencies = []
+
+[project.scripts]
+xbookmarks = "xbookmarks.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+xbookmarks = ["templates/*.html"]

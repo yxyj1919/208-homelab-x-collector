@@ -1,0 +1,268 @@
+VMware:
+  description: VMware platform topics including ESXi, vSphere, vSAN, PowerCLI, Aria, and VMware operations outside narrower vCenter or VCF scope.
+  keywords:
+    - vmware
+    - powercli
+    - esxi
+    - vsphere
+    - vsan
+    - aria
+vCenter:
+  description: vCenter Server, VCSA, vpxd, vmon, service health, inventory management, and vCenter troubleshooting.
+  keywords:
+    - vcenter
+    - vcsa
+    - vpxd
+    - vmon
+VCF:
+  description: VMware Cloud Foundation, SDDC Manager, lifecycle management, bring-up, upgrade, and VCF architecture.
+  keywords:
+    - vcf
+    - vmware cloud foundation
+    - sddc manager
+Kubernetes:
+  description: Kubernetes core platform, kubectl, clusters, workloads, Helm, container runtime, and cloud native operations.
+  keywords:
+    - kubernetes
+    - k8s
+    - kubectl
+    - containerd
+    - helm
+VKS:
+  description: VMware Kubernetes Service, Tanzu, supervisor clusters, TKGS, and VMware-specific Kubernetes integration.
+  keywords:
+    - vks
+    - tanzu
+    - vmwaretanzu
+    - tanzu hol
+    - tkgs
+    - supervisor cluster
+Networking:
+  description: Networking protocols and troubleshooting including TCP, HTTP, DNS, BGP, Cilium, Gateway API, packet flow, and request latency.
+  keywords:
+    - network
+    - tcp
+    - http
+    - http status
+    - dns
+    - bgp
+    - cilium
+    - gateway api
+DevOps:
+  description: Infrastructure automation and delivery including Docker, containers, Terraform, IaC, NGINX, microservices, and deployment workflows.
+  keywords:
+    - docker
+    - dockerfile
+    - dockerfiles
+    - container
+    - containers
+    - devops
+    - terraform
+    - iac
+    - nginx
+    - microservice
+Programming:
+  description: Software development, programming languages, frameworks, code patterns, databases, Git, Vim, and implementation tutorials.
+  keywords:
+    - python
+    - django
+    - flask
+    - javascript
+    - typescript
+    - react
+    - html
+    - css
+    - mysql
+    - sql
+    - git
+    - vim
+    - programming
+    - developer
+    - web dev
+    - type hints
+    - data classes
+    - instance methods
+    - regular expression
+    - object oriented
+    - 算法
+    - 编程
+    - 程序
+    - 开发
+    - 正则
+    - 脚本
+Linux:
+  description: Linux, Unix, shell, terminal, command line administration, system administration, and operating system internals.
+  keywords:
+    - linux
+    - unix
+    - shell
+    - bash
+    - terminal
+    - system administration
+    - 系统管理
+Data:
+  description: Data analysis, NumPy, Pandas, datasets, charts, visualization, reporting, data science, and analytics.
+  keywords:
+    - data
+    - numpy
+    - pandas
+    - datascience
+    - data science
+    - dataset
+    - datasets
+    - chart
+    - charts
+    - graph
+    - visualization
+    - bigdata
+    - reports
+    - 数据
+    - 可视化
+Tools:
+  description: Software tools, websites, browser extensions, CLI utilities, online services, notebooks, and apps worth trying or saving.
+  keywords:
+    - tool
+    - tools
+    - cli
+    - extension
+    - extensions
+    - browser extension
+    - singlefile
+    - website
+    - web app
+    - online service
+    - jupyter
+    - iterm
+    - warp
+    - chatgpt sc
+    - shortcut
+    - shortcuts
+    - notebook
+    - colab
+    - datalore
+    - 工具
+    - 工程师工具
+    - 浏览器扩展
+    - 快捷指令
+    - 网站
+    - 在线服务
+Productivity:
+  description: Personal and work productivity workflows, automation, information management, RSS, Notion, email, and subscription or storage workflows.
+  keywords:
+    - notion
+    - zapier
+    - rss
+    - netnewswire
+    - icloud
+    - google one
+    - email
+    - workflow
+    - automation
+    - information management
+    - 自动化
+    - 工作流
+    - 信息管理
+Learning:
+  description: Tutorials, courses, books, guides, hands-on labs, learning resources, and educational material not specific to language learning or career.
+  keywords:
+    - tutorial
+    - tutorials
+    - course
+    - courses
+    - book
+    - books
+    - guide
+    - hands on
+    - 学习
+    - 教程
+    - 书籍
+    - 入门
+Career:
+  description: Career growth, jobs, interviews, certifications, exams, bootcamps, professional development, and industry experience.
+  keywords:
+    - career
+    - job
+    - interview
+    - bootcamp
+    - certification
+    - certifications
+    - cert
+    - certs
+    - exam
+    - exams
+    - industry
+    - 职业
+    - 面试
+    - 认证
+    - 考试
+Language:
+  description: English learning, vocabulary, grammar, prepositions, word lookup, and language study.
+  keywords:
+    - english
+    - vocabulary
+    - grammar
+    - preposition
+    - prepositions
+    - 单词
+    - 英语
+Finance:
+  description: Personal finance, investing, ETF, stock market, subscriptions, credit cards, payment methods, and cost optimization.
+  keywords:
+    - stock
+    - stocks
+    - etf
+    - finance
+    - 理财
+    - 投资
+    - 信用卡
+Homelab:
+  description: Home lab infrastructure, NAS, routers, mini PCs, Proxmox, home networking, and personal infrastructure experiments.
+  keywords:
+    - homelab
+    - nas
+    - proxmox
+    - minipc
+    - router
+AI:
+  description: Artificial intelligence, LLMs, Ollama, OpenAI, RAG, embeddings, prompts, AI tools, and model workflows.
+  keywords:
+    - ai
+    - llm
+    - ollama
+    - openai
+    - rag
+    - embedding
+Security:
+  description: Security topics including CVEs, vulnerabilities, ransomware, SOC, zero trust, TLS, hacking, and defensive operations.
+  keywords:
+    - security
+    - cve
+    - vulnerability
+    - vulnerabilities
+    - ransomware
+    - soc
+    - zero trust
+    - tls
+    - 黑客
+Life:
+  description: Non-technical personal life, social topics, music, movies, podcasts, travel, battery, phone cards, documentaries, and entertainment.
+  keywords:
+    - life
+    - family
+    - travel
+    - music
+    - movie
+    - netflix
+    - documentary
+    - documentaries
+    - social media
+    - podcast
+    - battery
+    - phone card
+    - 生活
+    - 音乐
+    - 电影
+    - 纪录片
+    - 播客
+    - 电池
+    - 电话卡
