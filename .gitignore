@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 
+# Runtime data and generated HTML archives.
 data/
 archive/
 archive-*/

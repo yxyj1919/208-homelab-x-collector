@@ -10,6 +10,51 @@ Local-first X/Twitter bookmark archiver MVP.
 - 导出每条收藏为独立 HTML，并按分类目录保存。
 - 生成全局索引 `archive/_index/index.html`。
 
+## v0.1.0 Scope
+
+v0.1.0 是 JSON 导入版 MVP，适合作为本地收藏归档工具的第一版基线。
+
+已支持：
+
+- 从 X/Twitter 导出的 JSON 文件导入收藏。
+- 用 SQLite 保存原始收藏、分类、标签、导出路径和人工分类状态。
+- 使用本地规则分类，默认不依赖云端 API。
+- 可选使用 Ollama 进行本地或远端模型分类。
+- 手工修正单条收藏分类，并避免后续自动分类默认覆盖人工结果。
+- 为每条收藏生成独立 HTML 文件，并按分类目录保存。
+- 生成全局索引页面。
+
+未包含在 v0.1.0：
+
+- 直接登录 X/Twitter 账号同步收藏。
+- X API / OAuth 集成。
+- 定时任务安装脚本。
+- Web UI。
+- 多用户或远端服务部署。
+
+推荐运行顺序：
+
+```bash
+python3 -m xbookmarks.cli init --write-categories
+python3 -m xbookmarks.cli run --input samples/bookmarks.json
+python3 -m xbookmarks.cli stats
+```
+
+测试：
+
+```bash
+python3 -m pytest
+```
+
+运行数据默认写入：
+
+- SQLite 数据库：`data/bookmarks.sqlite`
+- HTML 归档：`archive/`
+- 分类配置：`config/categories.yaml`
+
+`data/`、`archive/`、`archive-*/` 和 `real-bookmarks.json` 是本地运行数据，默认不进入 Git。
+备份时优先保留 SQLite 数据库、分类配置和需要长期保存的 HTML 归档目录。
+
 ## Quick Start
 
 ```bash
