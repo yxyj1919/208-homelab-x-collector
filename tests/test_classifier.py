@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from xbookmarks.classifier import OllamaClassifier, RuleBasedClassifier
-from xbookmarks.config import load_category_config, load_category_rules
+from xbookmarks.cli import main
+from xbookmarks.config import (
+    category_config_for_interests,
+    load_category_config,
+    load_category_rules,
+)
 
 
 class RuleBasedClassifierTest(unittest.TestCase):
@@ -100,6 +107,106 @@ class CategoryConfigTest(unittest.TestCase):
         self.assertIn("Tools", definitions)
         self.assertIn("browser extensions", definitions["Tools"].description)
         self.assertIn("singlefile", definitions["Tools"].keywords)
+
+    def test_interest_presets_include_descriptions(self) -> None:
+        definitions = category_config_for_interests(["virtualization", "kubernetes"])
+
+        self.assertIn("vCenter", definitions)
+        self.assertIn("vCenter Server", definitions["vCenter"].description)
+        self.assertIn("vks", definitions["VKS"].keywords)
+
+    def test_init_writes_selected_interest_categories(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            categories = base / "categories.yaml"
+
+            exit_code = main(
+                [
+                    "--db",
+                    str(db),
+                    "--categories",
+                    str(categories),
+                    "init",
+                    "--write-categories",
+                    "--interests",
+                    "virtualization,kubernetes",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            definitions = load_category_config(categories)
+            self.assertEqual(
+                list(definitions),
+                ["VMware", "vCenter", "VCF", "Kubernetes", "VKS", "General"],
+            )
+            self.assertIn("VMware platform topics", definitions["VMware"].description)
+            self.assertIn("Fallback category", definitions["General"].description)
+
+    def test_category_add_creates_new_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            categories = Path(temp_dir) / "categories.yaml"
+
+            exit_code = main(
+                [
+                    "--categories",
+                    str(categories),
+                    "category",
+                    "add",
+                    "Storage",
+                    "--description",
+                    "Storage systems, filesystems, NAS, and backup.",
+                    "--keywords",
+                    "storage, filesystem",
+                    "--keyword",
+                    "backup",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            definitions = load_category_config(categories)
+            self.assertEqual(
+                definitions["Storage"].description,
+                "Storage systems, filesystems, NAS, and backup.",
+            )
+            self.assertEqual(
+                definitions["Storage"].keywords,
+                ["backup", "storage", "filesystem"],
+            )
+
+    def test_category_add_merges_keywords_without_replace(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            categories = Path(temp_dir) / "categories.yaml"
+            main(
+                [
+                    "--categories",
+                    str(categories),
+                    "category",
+                    "add",
+                    "Storage",
+                    "--description",
+                    "Storage systems.",
+                    "--keywords",
+                    "nas, backup",
+                ]
+            )
+
+            exit_code = main(
+                [
+                    "--categories",
+                    str(categories),
+                    "category",
+                    "add",
+                    "Storage",
+                    "--keywords",
+                    "Backup, zfs",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            definitions = load_category_config(categories)
+            self.assertEqual(definitions["Storage"].description, "Storage systems.")
+            self.assertEqual(definitions["Storage"].keywords, ["nas", "backup", "zfs"])
 
 
 if __name__ == "__main__":

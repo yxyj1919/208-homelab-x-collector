@@ -6,33 +6,89 @@ from pathlib import Path
 
 DEFAULT_CATEGORIES = Path("config/categories.yaml")
 
-INTEREST_PRESETS: dict[str, dict[str, list[str]]] = {
-    "virtualization": {
-        "VMware": ["vmware", "powercli", "esxi", "vsphere", "vsan", "aria"],
-        "vCenter": ["vcenter", "vcsa", "vpxd", "vmon"],
-        "VCF": ["vcf", "vmware cloud foundation", "sddc manager"],
-    },
-    "kubernetes": {
-        "Kubernetes": ["kubernetes", "k8s", "kubectl", "containerd", "helm"],
-        "VKS": ["vks", "tanzu", "vmwaretanzu", "tkgs", "supervisor cluster"],
-    },
-    "homelab": {
-        "Homelab": ["homelab", "nas", "proxmox", "minipc", "router"],
-        "Networking": ["network", "tcp", "http", "dns", "bgp", "cilium"],
-    },
-    "ai": {
-        "AI": ["ai", "llm", "ollama", "openai", "rag", "embedding"],
-    },
-    "security": {
-        "Security": ["security", "cve", "vulnerability", "ransomware", "soc", "tls"],
-    },
-}
-
 
 @dataclass(frozen=True)
 class CategoryDefinition:
     description: str
     keywords: list[str]
+
+
+INTEREST_PRESETS: dict[str, dict[str, CategoryDefinition]] = {
+    "virtualization": {
+        "VMware": CategoryDefinition(
+            description=(
+                "VMware platform topics including ESXi, vSphere, vSAN, "
+                "PowerCLI, Aria, and VMware operations outside narrower "
+                "vCenter or VCF scope."
+            ),
+            keywords=["vmware", "powercli", "esxi", "vsphere", "vsan", "aria"],
+        ),
+        "vCenter": CategoryDefinition(
+            description=(
+                "vCenter Server, VCSA, vpxd, vmon, service health, inventory "
+                "management, and vCenter troubleshooting."
+            ),
+            keywords=["vcenter", "vcsa", "vpxd", "vmon"],
+        ),
+        "VCF": CategoryDefinition(
+            description=(
+                "VMware Cloud Foundation, SDDC Manager, lifecycle management, "
+                "bring-up, upgrade, and VCF architecture."
+            ),
+            keywords=["vcf", "vmware cloud foundation", "sddc manager"],
+        ),
+    },
+    "kubernetes": {
+        "Kubernetes": CategoryDefinition(
+            description=(
+                "Kubernetes core platform, kubectl, clusters, workloads, "
+                "Helm, container runtime, and cloud native operations."
+            ),
+            keywords=["kubernetes", "k8s", "kubectl", "containerd", "helm"],
+        ),
+        "VKS": CategoryDefinition(
+            description=(
+                "VMware Kubernetes Service, Tanzu, supervisor clusters, TKGS, "
+                "and VMware-specific Kubernetes integration."
+            ),
+            keywords=["vks", "tanzu", "vmwaretanzu", "tkgs", "supervisor cluster"],
+        ),
+    },
+    "homelab": {
+        "Homelab": CategoryDefinition(
+            description=(
+                "Home lab infrastructure, NAS, routers, mini PCs, Proxmox, "
+                "home networking, and personal infrastructure experiments."
+            ),
+            keywords=["homelab", "nas", "proxmox", "minipc", "router"],
+        ),
+        "Networking": CategoryDefinition(
+            description=(
+                "Networking protocols and troubleshooting including TCP, HTTP, "
+                "DNS, BGP, Cilium, Gateway API, packet flow, and request latency."
+            ),
+            keywords=["network", "tcp", "http", "dns", "bgp", "cilium"],
+        ),
+    },
+    "ai": {
+        "AI": CategoryDefinition(
+            description=(
+                "Artificial intelligence, LLMs, Ollama, OpenAI, RAG, embeddings, "
+                "prompts, AI tools, and model workflows."
+            ),
+            keywords=["ai", "llm", "ollama", "openai", "rag", "embedding"],
+        ),
+    },
+    "security": {
+        "Security": CategoryDefinition(
+            description=(
+                "Security topics including CVEs, vulnerabilities, ransomware, "
+                "SOC, zero trust, TLS, hacking, and defensive operations."
+            ),
+            keywords=["security", "cve", "vulnerability", "ransomware", "soc", "tls"],
+        ),
+    },
+}
 
 
 def load_category_config(
@@ -140,8 +196,39 @@ def merge_category_rules(
     return merged
 
 
-def rules_for_interests(interests: list[str]) -> dict[str, list[str]]:
-    selected: dict[str, list[str]] = {}
+def merge_category_config(
+    base: dict[str, CategoryDefinition],
+    additions: dict[str, CategoryDefinition],
+) -> dict[str, CategoryDefinition]:
+    merged = {
+        category: CategoryDefinition(
+            description=definition.description,
+            keywords=list(definition.keywords),
+        )
+        for category, definition in base.items()
+    }
+    for category, definition in additions.items():
+        current = merged.get(category)
+        if current is None:
+            merged[category] = CategoryDefinition(
+                description=definition.description,
+                keywords=list(definition.keywords),
+            )
+            continue
+        merged_rules = merge_category_rules(
+            {category: current.keywords}, {category: definition.keywords}
+        )
+        merged[category] = CategoryDefinition(
+            description=current.description or definition.description,
+            keywords=merged_rules[category],
+        )
+    return merged
+
+
+def category_config_for_interests(
+    interests: list[str],
+) -> dict[str, CategoryDefinition]:
+    selected: dict[str, CategoryDefinition] = {}
     for interest in interests:
         key = interest.strip().lower()
         if not key:
@@ -152,5 +239,12 @@ def rules_for_interests(interests: list[str]) -> dict[str, list[str]]:
                 f"Unknown interest preset: {interest}. "
                 f"Available presets: {', '.join(sorted(INTEREST_PRESETS))}"
             )
-        selected = merge_category_rules(selected, preset)
+        selected = merge_category_config(selected, preset)
     return selected
+
+
+def rules_for_interests(interests: list[str]) -> dict[str, list[str]]:
+    return {
+        category: definition.keywords
+        for category, definition in category_config_for_interests(interests).items()
+    }

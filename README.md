@@ -17,6 +17,20 @@ python3 -m xbookmarks.cli init
 python3 -m xbookmarks.cli run --input samples/bookmarks.json
 ```
 
+首次使用时可以先选择兴趣领域，生成对应的预设分类：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli category presets
+PYTHONPATH=src python3 -m xbookmarks.cli init \
+  --write-categories \
+  --interests virtualization,kubernetes,homelab,ai,security
+```
+
+如果没有传 `--interests`，`init --write-categories` 会写入默认技术领域预设：
+`virtualization`、`kubernetes`、`homelab`、`ai`、`security`。
+已有 `config/categories.yaml` 时默认只合并缺失的分类和关键词；需要重写时再加
+`--force-categories`。
+
 默认输出：
 
 - SQLite 数据库：`data/bookmarks.sqlite`
@@ -96,9 +110,29 @@ Tools:
 ```bash
 PYTHONPATH=src python3 -m xbookmarks.cli category add Tools \
   --description "Software tools, websites, browser extensions, CLI utilities." \
-  --keyword tool \
-  --keyword extension
+  --keywords "tool,extension,cli"
 ```
+
+`category add` 可以直接创建新的 `config/categories.yaml`。分类已存在时，默认保留原
+`description`，并把新关键词合并进去；关键词大小写不同但内容相同会自动去重。
+
+示例：手工新增一个 Storage 分类：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli category add Storage \
+  --description "Storage systems, filesystems, NAS, and backup." \
+  --keywords "storage,filesystem,nas,backup,zfs"
+PYTHONPATH=src python3 -m xbookmarks.cli category list
+```
+
+新增分类后，对已有数据重新分类并导出：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli classify --all
+PYTHONPATH=src python3 -m xbookmarks.cli export-html
+```
+
+如果需要完全替换已有分类的描述和关键词，添加 `--replace`。
 
 ## Ollama Provider
 

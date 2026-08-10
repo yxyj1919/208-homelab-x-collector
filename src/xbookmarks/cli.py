@@ -10,12 +10,11 @@ from .config import (
     DEFAULT_CATEGORIES,
     INTEREST_PRESETS,
     CategoryDefinition,
+    category_config_for_interests,
     load_category_config,
-    load_category_rules,
+    merge_category_config,
     merge_category_rules,
-    rules_for_interests,
     save_category_config,
-    save_category_rules,
 )
 from .exporter import export_html
 from .importer import load_bookmarks
@@ -88,10 +87,16 @@ def main(argv: list[str] | None = None) -> int:
         dest="category_command", required=True
     )
     category_subparsers.add_parser("list")
+    category_subparsers.add_parser("presets")
     category_add_parser = category_subparsers.add_parser("add")
     category_add_parser.add_argument("name")
     category_add_parser.add_argument("--description", default="")
     category_add_parser.add_argument("--keyword", action="append", default=[])
+    category_add_parser.add_argument(
+        "--keywords",
+        default="",
+        help="Comma-separated keywords to add.",
+    )
     category_add_parser.add_argument("--replace", action="store_true")
 
     stats_parser = subparsers.add_parser("stats")
@@ -209,12 +214,17 @@ def main(argv: list[str] | None = None) -> int:
                     f"{', '.join(definition.keywords)}"
                 )
             return 0
+        if args.category_command == "presets":
+            for interest, definitions in sorted(INTEREST_PRESETS.items()):
+                print(f"{interest}\t{', '.join(definitions)}")
+            return 0
         if args.category_command == "add":
-            definitions = load_category_config(args.categories)
+            definitions = _load_category_config_or_empty(args.categories)
+            keywords = args.keyword + _parse_csv(args.keywords)
             if args.name in definitions and not args.replace:
                 current = definitions[args.name]
                 merged_rules = merge_category_rules(
-                    {args.name: current.keywords}, {args.name: args.keyword}
+                    {args.name: current.keywords}, {args.name: keywords}
                 )
                 definitions[args.name] = CategoryDefinition(
                     description=args.description or current.description,
@@ -222,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 definitions[args.name] = CategoryDefinition(
-                    description=args.description, keywords=args.keyword
+                    description=args.description, keywords=keywords
                 )
             save_category_config(definitions, args.categories)
             print(f"Saved category {args.name} to {args.categories}")
@@ -315,22 +325,31 @@ def _write_initial_categories(
     selected = _parse_csv(interests)
     if not selected:
         selected = ["virtualization", "kubernetes", "homelab", "ai", "security"]
-    preset_rules = rules_for_interests(selected)
+    preset_definitions = category_config_for_interests(selected)
 
     if categories_path.exists() and not force:
-        existing = load_category_rules(categories_path)
-        rules = merge_category_rules(existing, preset_rules)
+        existing = load_category_config(categories_path)
+        definitions = merge_category_config(existing, preset_definitions)
     else:
-        rules = preset_rules
-    if "General" not in rules:
-        rules["General"] = []
-    save_category_rules(rules, categories_path)
+        definitions = preset_definitions
+    if "General" not in definitions:
+        definitions["General"] = CategoryDefinition(
+            description="Fallback category when no specific interest category fits.",
+            keywords=[],
+        )
+    save_category_config(definitions, categories_path)
 
 
 def _parse_csv(value: str | None) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _load_category_config_or_empty(path: Path) -> dict[str, CategoryDefinition]:
+    if not path.exists():
+        return {}
+    return load_category_config(path)
 
 
 def _build_classifier(

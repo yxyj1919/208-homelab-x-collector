@@ -266,3 +266,6 @@ Life:
     - 播客
     - 电池
     - 电话卡
+General:
+  description: Fallback category when no specific interest category fits.
+  keywords:
