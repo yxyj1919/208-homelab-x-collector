@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     created_at TEXT,
     raw_json TEXT NOT NULL,
     category TEXT,
+    category_source TEXT NOT NULL DEFAULT 'auto',
     tags_json TEXT NOT NULL DEFAULT '[]',
     confidence REAL,
     reason TEXT,
@@ -46,6 +47,15 @@ class BookmarkStore:
     def init(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(bookmarks)").fetchall()
+            }
+            if "category_source" not in columns:
+                conn.execute(
+                    "ALTER TABLE bookmarks "
+                    "ADD COLUMN category_source TEXT NOT NULL DEFAULT 'auto'"
+                )
 
     def upsert_bookmarks(self, bookmarks: Iterable[Bookmark]) -> int:
         self.init()
@@ -83,6 +93,7 @@ class BookmarkStore:
         only_unclassified: bool = False,
         category: str | None = None,
         limit: int | None = None,
+        skip_manual: bool = False,
     ) -> list[dict]:
         self.init()
         clauses = []
@@ -92,6 +103,8 @@ class BookmarkStore:
         if category is not None:
             clauses.append("category = ?")
             params.append(category)
+        if skip_manual:
+            clauses.append("category_source != 'manual'")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         limit_sql = "LIMIT ?" if limit is not None else ""
         if limit is not None:
@@ -100,8 +113,8 @@ class BookmarkStore:
         with self.connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT tweet_id, url, text, author, created_at, category, tags_json,
-                       confidence, reason, export_path
+                SELECT tweet_id, url, text, author, created_at, category,
+                       category_source, tags_json, confidence, reason, export_path
                 FROM bookmarks
                 {where}
                 ORDER BY COALESCE(created_at, imported_at) DESC, tweet_id DESC
@@ -112,18 +125,19 @@ class BookmarkStore:
         return [dict(row) for row in rows]
 
     def save_classification(
-        self, tweet_id: str, result: ClassificationResult
+        self, tweet_id: str, result: ClassificationResult, source: str = "auto"
     ) -> None:
         with self.connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE bookmarks
-                SET category = ?, tags_json = ?, confidence = ?, reason = ?,
-                    updated_at = CURRENT_TIMESTAMP
+                SET category = ?, category_source = ?, tags_json = ?,
+                    confidence = ?, reason = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE tweet_id = ?
                 """,
                 (
                     result.category,
+                    source,
                     json.dumps(result.tags, ensure_ascii=False),
                     result.confidence,
                     result.reason,

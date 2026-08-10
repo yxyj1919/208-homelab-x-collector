@@ -62,6 +62,11 @@ def main(argv: list[str] | None = None) -> int:
     classify_parser.add_argument("--all", action="store_true", help="Reclassify all rows")
     classify_parser.add_argument("--only-category")
     classify_parser.add_argument("--limit", type=int)
+    classify_parser.add_argument(
+        "--include-manual",
+        action="store_true",
+        help="Allow reclassification to overwrite manually adjusted categories.",
+    )
     _add_provider_args(classify_parser)
 
     benchmark_parser = subparsers.add_parser("benchmark")
@@ -79,6 +84,11 @@ def main(argv: list[str] | None = None) -> int:
     set_category_parser.add_argument(
         "--reason", default="Manually adjusted by user."
     )
+    set_category_parser.add_argument(
+        "--archive-dir",
+        type=Path,
+        help="Re-export HTML archive after changing the category.",
+    )
 
     export_parser = subparsers.add_parser("export-html")
     export_parser.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE)
@@ -87,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--input", type=Path, required=True)
     run_parser.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE)
     run_parser.add_argument("--reclassify", action="store_true")
+    run_parser.add_argument(
+        "--include-manual",
+        action="store_true",
+        help="Allow reclassification to overwrite manually adjusted categories.",
+    )
     _add_provider_args(run_parser)
 
     category_parser = subparsers.add_parser("category")
@@ -138,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
             only_unclassified=(not args.all and args.only_category is None),
             only_category=args.only_category,
             limit=args.limit,
+            include_manual=args.include_manual,
         )
         print(f"Classified {count} bookmark(s).")
         return 0
@@ -193,7 +209,10 @@ def main(argv: list[str] | None = None) -> int:
                 confidence=1.0,
                 reason=args.reason,
             ),
+            source="manual",
         )
+        if args.archive_dir:
+            export_html(store, args.archive_dir)
         print(f"Updated category for {args.tweet_id}: {args.category}")
         return 0
 
@@ -215,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
             only_unclassified=not args.reclassify,
             only_category=None,
             limit=None,
+            include_manual=args.include_manual,
         )
         exported = export_html(store, args.archive_dir)
         print(
@@ -311,13 +331,17 @@ def _classify(
     only_unclassified: bool,
     only_category: str | None,
     limit: int | None,
+    include_manual: bool,
 ) -> int:
     definitions = load_category_config(categories_path)
     classifier = _build_classifier(
         provider, definitions, ollama_model, ollama_url, ollama_timeout
     )
     rows = store.iter_bookmarks(
-        only_unclassified=only_unclassified, category=only_category, limit=limit
+        only_unclassified=only_unclassified,
+        category=only_category,
+        limit=limit,
+        skip_manual=not include_manual,
     )
     total = len(rows)
     for index, row in enumerate(rows, 1):

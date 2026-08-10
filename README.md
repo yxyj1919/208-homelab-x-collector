@@ -134,6 +134,26 @@ PYTHONPATH=src python3 -m xbookmarks.cli export-html
 
 如果需要完全替换已有分类的描述和关键词，添加 `--replace`。
 
+## Manual Category Fixes
+
+分类后可以手工调整单条收藏的分类：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli --db data/bookmarks.sqlite set-category \
+  1001 VCF \
+  --tags "vcf,manual" \
+  --archive-dir archive
+```
+
+`set-category` 会把该条记录标记为人工分类。之后运行 `classify --all` 或
+`run --reclassify` 默认不会覆盖人工分类。
+
+如果确认要让自动分类覆盖人工修改，显式添加 `--include-manual`：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli classify --all --include-manual
+```
+
 ## Ollama Provider
 
 默认 provider 是本地规则：
