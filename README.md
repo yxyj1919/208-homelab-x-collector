@@ -87,6 +87,13 @@ PYTHONPATH=src python3 -m xbookmarks.cli init \
 python3 -m xbookmarks.cli stats
 ```
 
+查看最近一次运行状态和运行日志：
+
+```bash
+python3 -m xbookmarks.cli sync-status
+python3 -m xbookmarks.cli run-log --limit 10
+```
+
 单步执行：
 
 ```bash
@@ -94,6 +101,9 @@ python3 -m xbookmarks.cli import samples/bookmarks.json
 python3 -m xbookmarks.cli classify
 python3 -m xbookmarks.cli export-html
 ```
+
+导入时会按 `tweet_id` 去重，并用内容 hash 检测同一收藏是否发生变化。输出中的
+`inserted`、`updated`、`unchanged` 和 `duplicates` 可用于确认增量导入效果。
 
 ## JSON Input
 

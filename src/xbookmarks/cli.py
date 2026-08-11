@@ -6,7 +6,6 @@ import sys
 import time
 from pathlib import Path
 
-from .classifier import OllamaClassifier, RuleBasedClassifier
 from .config import (
     DEFAULT_CATEGORIES,
     INTEREST_PRESETS,
@@ -20,6 +19,12 @@ from .config import (
 from .exporter import export_html
 from .importer import load_bookmarks
 from .models import ClassificationResult
+from .providers import (
+    PROVIDER_NAMES,
+    ProviderOptions,
+    build_ollama_healthcheck_provider,
+    build_provider,
+)
 from .storage import BookmarkStore
 
 
@@ -124,6 +129,11 @@ def main(argv: list[str] | None = None) -> int:
     stats_parser = subparsers.add_parser("stats")
     stats_parser.add_argument("--by-category", action="store_true")
 
+    subparsers.add_parser("sync-status")
+
+    run_log_parser = subparsers.add_parser("run-log")
+    run_log_parser.add_argument("--limit", type=int, default=10)
+
     args = parser.parse_args(argv)
     store = BookmarkStore(args.db)
 
@@ -138,8 +148,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "import":
         bookmarks = load_bookmarks(args.input)
-        count = store.upsert_bookmarks(bookmarks)
-        print(f"Imported {count} bookmark(s).")
+        result = store.upsert_bookmarks(bookmarks)
+        print(
+            f"Imported {result.imported} bookmark(s): "
+            f"inserted={result.inserted} updated={result.updated} "
+            f"unchanged={result.unchanged} duplicates={result.duplicates}"
+        )
         return 0
 
     if args.command == "classify":
@@ -173,13 +187,12 @@ def main(argv: list[str] | None = None) -> int:
             f"Benchmarked {result['count']} bookmark(s): "
             f"total_seconds={result['total_seconds']:.2f} "
             f"avg_seconds={result['avg_seconds']:.2f} "
-            f"provider={args.provider} model={args.ollama_model if args.provider == 'ollama' else 'rules'}"
+            f"provider={result['provider']} model={result['model']}"
         )
         return 0
 
     if args.command == "ollama-check":
-        classifier = OllamaClassifier(
-            categories=["General"],
+        classifier = build_ollama_healthcheck_provider(
             model=args.ollama_model,
             base_url=args.ollama_url,
             timeout_seconds=args.ollama_timeout,
@@ -222,25 +235,106 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "run":
-        bookmarks = load_bookmarks(args.input)
-        imported = store.upsert_bookmarks(bookmarks)
-        classified = _classify(
-            store,
-            categories_path=args.categories,
-            provider=args.provider,
-            ollama_model=args.ollama_model,
-            ollama_url=args.ollama_url,
-            ollama_timeout=args.ollama_timeout,
-            only_unclassified=not args.reclassify,
-            only_category=None,
-            limit=None,
-            include_manual=args.include_manual,
+        provider_instance = _build_provider(
+            args.provider,
+            load_category_config(args.categories),
+            args.ollama_model,
+            args.ollama_url,
+            args.ollama_timeout,
         )
-        exported = export_html(store, args.archive_dir)
+        run_id = store.begin_run(
+            "run",
+            input_path=args.input,
+            archive_dir=args.archive_dir,
+            provider=provider_instance.name,
+            model=provider_instance.model_label,
+        )
+        imported = 0
+        import_summary = None
+        classified = 0
+        exported = 0
+        try:
+            bookmarks = load_bookmarks(args.input)
+            import_summary = store.upsert_bookmarks(bookmarks)
+            imported = import_summary.imported
+            classified = _classify(
+                store,
+                categories_path=args.categories,
+                provider=args.provider,
+                ollama_model=args.ollama_model,
+                ollama_url=args.ollama_url,
+                ollama_timeout=args.ollama_timeout,
+                only_unclassified=not args.reclassify,
+                only_category=None,
+                limit=None,
+                include_manual=args.include_manual,
+            )
+            exported = export_html(store, args.archive_dir)
+        except Exception as exc:
+            store.finish_run(
+                run_id,
+                "failed",
+                imported_count=imported,
+                classified_count=classified,
+                exported_count=exported,
+                message=str(exc),
+            )
+            raise
+        store.finish_run(
+            run_id,
+            "succeeded",
+            imported_count=imported,
+            classified_count=classified,
+            exported_count=exported,
+        )
+        import_details = ""
+        if import_summary is not None:
+            import_details = (
+                f", inserted={import_summary.inserted}"
+                f", updated={import_summary.updated}"
+                f", unchanged={import_summary.unchanged}"
+                f", duplicates={import_summary.duplicates}"
+            )
         print(
-            f"Run complete: imported={imported}, classified={classified}, "
+            f"Run complete: run_id={run_id}, imported={imported}{import_details}, classified={classified}, "
             f"exported={exported}, archive={args.archive_dir}"
         )
+        return 0
+
+    if args.command == "sync-status":
+        state = store.sync_state()
+        if not state:
+            print("No sync state recorded.")
+            return 0
+        for name, value in state.items():
+            print(f"{name}={value}")
+        latest = store.list_run_logs(limit=1)
+        if latest:
+            run = latest[0]
+            print(
+                "latest_run="
+                f"id={run['id']} status={run['status']} command={run['command']} "
+                f"started_at={run['started_at']} ended_at={run['ended_at']}"
+            )
+        return 0
+
+    if args.command == "run-log":
+        if args.limit < 1:
+            parser.error("--limit must be at least 1")
+        rows = store.list_run_logs(limit=args.limit)
+        if not rows:
+            print("No run logs recorded.")
+            return 0
+        for row in rows:
+            print(
+                f"{row['id']}\t{row['status']}\t{row['command']}\t"
+                f"started={row['started_at']}\tended={row['ended_at']}\t"
+                f"provider={row['provider'] or ''}\tmodel={row['model'] or ''}\t"
+                f"imported={row['imported_count']}\t"
+                f"classified={row['classified_count']}\t"
+                f"exported={row['exported_count']}\t"
+                f"message={row['message'] or ''}"
+            )
         return 0
 
     if args.command == "stats":
@@ -292,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _add_provider_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--provider", choices=("rules", "ollama"), default="rules")
+    parser.add_argument("--provider", choices=PROVIDER_NAMES, default="rules")
     _add_ollama_args(parser)
 
 
@@ -334,7 +428,7 @@ def _classify(
     include_manual: bool,
 ) -> int:
     definitions = load_category_config(categories_path)
-    classifier = _build_classifier(
+    provider_instance = _build_provider(
         provider, definitions, ollama_model, ollama_url, ollama_timeout
     )
     rows = store.iter_bookmarks(
@@ -345,13 +439,15 @@ def _classify(
     )
     total = len(rows)
     for index, row in enumerate(rows, 1):
-        if provider == "ollama":
+        if provider_instance.show_progress:
             print(
                 f"Classifying {index}/{total}: {row['tweet_id']}",
                 file=sys.stderr,
                 flush=True,
             )
-        result = classifier.classify(f"{row.get('text') or ''} {row.get('author') or ''}")
+        result = provider_instance.classifier.classify(
+            f"{row.get('text') or ''} {row.get('author') or ''}"
+        )
         store.save_classification(row["tweet_id"], result)
     return len(rows)
 
@@ -365,11 +461,11 @@ def _benchmark(
     ollama_timeout: int,
     only_category: str | None,
     limit: int,
-) -> dict[str, float | int]:
+) -> dict[str, float | int | str]:
     if limit < 1:
         raise ValueError("--limit must be at least 1")
     definitions = load_category_config(categories_path)
-    classifier = _build_classifier(
+    provider_instance = _build_provider(
         provider, definitions, ollama_model, ollama_url, ollama_timeout
     )
     rows = store.iter_bookmarks(
@@ -379,19 +475,23 @@ def _benchmark(
     )
     start = time.perf_counter()
     for index, row in enumerate(rows, 1):
-        if provider == "ollama":
+        if provider_instance.show_progress:
             print(
                 f"Benchmarking {index}/{len(rows)}: {row['tweet_id']}",
                 file=sys.stderr,
                 flush=True,
             )
-        classifier.classify(f"{row.get('text') or ''} {row.get('author') or ''}")
+        provider_instance.classifier.classify(
+            f"{row.get('text') or ''} {row.get('author') or ''}"
+        )
     elapsed = time.perf_counter() - start
     count = len(rows)
     return {
         "count": count,
         "total_seconds": elapsed,
         "avg_seconds": elapsed / count if count else 0.0,
+        "provider": provider_instance.name,
+        "model": provider_instance.model_label,
     }
 
 
@@ -434,25 +534,28 @@ def _build_classifier(
     ollama_model: str,
     ollama_url: str,
     ollama_timeout: int,
-) -> RuleBasedClassifier | OllamaClassifier:
-    rules = {
-        category: definition.keywords
-        for category, definition in definitions.items()
-    }
-    if provider == "rules":
-        return RuleBasedClassifier(rules)
-    if provider == "ollama":
-        return OllamaClassifier(
-            categories=list(definitions.keys()),
-            category_descriptions={
-                category: definition.description
-                for category, definition in definitions.items()
-            },
-            model=ollama_model,
-            base_url=ollama_url,
-            timeout_seconds=ollama_timeout,
-        )
-    raise ValueError(f"Unsupported provider: {provider}")
+) -> object:
+    return _build_provider(
+        provider, definitions, ollama_model, ollama_url, ollama_timeout
+    ).classifier
+
+
+def _build_provider(
+    provider: str,
+    definitions: dict[str, CategoryDefinition],
+    ollama_model: str,
+    ollama_url: str,
+    ollama_timeout: int,
+):
+    return build_provider(
+        ProviderOptions(
+            name=provider,
+            ollama_model=ollama_model,
+            ollama_url=ollama_url,
+            ollama_timeout=ollama_timeout,
+        ),
+        definitions,
+    )
 
 
 if __name__ == "__main__":

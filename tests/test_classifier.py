@@ -12,6 +12,7 @@ from xbookmarks.config import (
     load_category_config,
     load_category_rules,
 )
+from xbookmarks.providers import ProviderOptions, build_provider
 
 
 class RuleBasedClassifierTest(unittest.TestCase):
@@ -134,6 +135,41 @@ class OllamaClassifierTest(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 0)
+
+
+class ProviderTest(unittest.TestCase):
+    def test_build_rules_provider(self) -> None:
+        provider = build_provider(
+            ProviderOptions(
+                name="rules",
+                ollama_model="ignored",
+                ollama_url="http://127.0.0.1:11434",
+                ollama_timeout=30,
+            ),
+            category_config_for_interests(["virtualization"]),
+        )
+
+        self.assertEqual(provider.name, "rules")
+        self.assertEqual(provider.model_label, "rules")
+        self.assertFalse(provider.show_progress)
+        self.assertIsInstance(provider.classifier, RuleBasedClassifier)
+
+    def test_build_ollama_provider(self) -> None:
+        provider = build_provider(
+            ProviderOptions(
+                name="ollama",
+                ollama_model="qwen2.5:7b",
+                ollama_url="http://192.168.31.10:11434/",
+                ollama_timeout=30,
+            ),
+            category_config_for_interests(["ai"]),
+        )
+
+        self.assertEqual(provider.name, "ollama")
+        self.assertEqual(provider.model_label, "qwen2.5:7b")
+        self.assertTrue(provider.show_progress)
+        self.assertIsInstance(provider.classifier, OllamaClassifier)
+        self.assertEqual(provider.classifier.base_url, "http://192.168.31.10:11434")
 
 
 class CategoryConfigTest(unittest.TestCase):
