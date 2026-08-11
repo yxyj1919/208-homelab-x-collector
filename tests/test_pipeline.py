@@ -20,6 +20,7 @@ from xbookmarks.connectors import (
     ConnectorRateLimitError,
     JsonFileConnector,
     XApiConnector,
+    XArchiveJsonConnector,
     build_connector,
     read_bearer_token,
 )
@@ -259,6 +260,124 @@ class PipelineTest(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(category, "Programming")
             self.assertEqual(source, "auto")
+
+    def test_xarchive_json_import_maps_folders_to_category_and_tags(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            archive = base / "archive"
+            sample = base / "xarchive.json"
+            sample.write_text(
+                json.dumps(
+                    {
+                        "export_metadata": {"tool": "xarchive"},
+                        "folders": [{"id": "f1", "name": "VCF"}],
+                        "bookmarks": [
+                            {
+                                "tweet_id": "9001",
+                                "status": "available",
+                                "created_at": "2026-08-10T10:00:00Z",
+                                "full_text": "VMware Cloud Foundation note",
+                                "folders": ["VCF", "Homelab"],
+                                "author": {
+                                    "screen_name": "vmw_notes",
+                                    "name": "VMware Notes",
+                                },
+                                "metrics": {"likes": 3},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = main(
+                [
+                    "--db",
+                    str(db),
+                    "run",
+                    "--connector",
+                    "xarchive-json",
+                    "--input",
+                    str(sample),
+                    "--archive-dir",
+                    str(archive),
+                ]
+            )
+
+            with sqlite3.connect(db) as conn:
+                category, source, tags_json, raw_json = conn.execute(
+                    """
+                    SELECT category, category_source, tags_json, raw_json
+                    FROM bookmarks
+                    WHERE tweet_id = '9001'
+                    """
+                ).fetchone()
+            exported_file_exists = (
+                archive / "VCF" / "2026-08-10_9001.html"
+            ).exists()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(category, "VCF")
+        self.assertEqual(source, "auto")
+        self.assertEqual(json.loads(tags_json), ["VCF", "Homelab"])
+        self.assertEqual(json.loads(raw_json)["metrics"]["likes"], 3)
+        self.assertTrue(exported_file_exists)
+
+    def test_xarchive_json_import_preserves_manual_category(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            sample = base / "xarchive.json"
+            sample.write_text(
+                json.dumps(
+                    {
+                        "bookmarks": [
+                            {
+                                "tweet_id": "9001",
+                                "status": "available",
+                                "full_text": "VMware Cloud Foundation note",
+                                "folders": ["VCF"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            main(
+                [
+                    "--db",
+                    str(db),
+                    "import",
+                    str(sample),
+                    "--connector",
+                    "xarchive-json",
+                ]
+            )
+            main(["--db", str(db), "set-category", "9001", "Manual"])
+            main(
+                [
+                    "--db",
+                    str(db),
+                    "import",
+                    str(sample),
+                    "--connector",
+                    "xarchive-json",
+                ]
+            )
+
+            with sqlite3.connect(db) as conn:
+                category, source = conn.execute(
+                    """
+                    SELECT category, category_source
+                    FROM bookmarks
+                    WHERE tweet_id = '9001'
+                    """
+                ).fetchone()
+
+        self.assertEqual(category, "Manual")
+        self.assertEqual(source, "manual")
 
     def test_update_command_sets_notes_tags_and_status_fields(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -914,6 +1033,41 @@ class ConnectorTest(unittest.TestCase):
         self.assertEqual(len(batch.bookmarks), 1)
         self.assertEqual(batch.bookmarks[0].tweet_id, "9001")
         self.assertEqual(batch.metadata["source_path"], str(sample))
+
+    def test_build_xarchive_json_connector(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            sample = Path(temp_dir) / "xarchive.json"
+            sample.write_text(
+                json.dumps(
+                    {
+                        "export_metadata": {"tool": "xarchive"},
+                        "bookmarks": [
+                            {
+                                "tweet_id": "9001",
+                                "status": "available",
+                                "full_text": "VMware note",
+                                "author": {"screen_name": "vmw_notes"},
+                            },
+                            {
+                                "tweet_id": "9002",
+                                "status": "unavailable",
+                                "unavailable_reason": "deleted",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            connector = build_connector(
+                ConnectorOptions(name="xarchive-json", input_path=sample)
+            )
+            batch = connector.sync()
+
+        self.assertIsInstance(connector, XArchiveJsonConnector)
+        self.assertEqual([bookmark.tweet_id for bookmark in batch.bookmarks], ["9001"])
+        self.assertEqual(batch.bookmarks[0].author, "vmw_notes")
+        self.assertEqual(batch.metadata["result_count"], "1")
 
     def test_read_bearer_token_from_file(self) -> None:
         with TemporaryDirectory() as temp_dir:

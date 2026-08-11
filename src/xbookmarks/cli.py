@@ -25,6 +25,7 @@ from .connectors import (
     build_connector,
 )
 from .exporter import export_html
+from .models import ClassificationResult
 from .providers import (
     PROVIDER_NAMES,
     ProviderOptions,
@@ -224,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
             x_max_pages=args.x_max_pages,
         )
         result = store.upsert_bookmarks(batch.bookmarks)
+        _apply_xarchive_metadata(store, batch)
         print(
             f"Imported {result.imported} bookmark(s): "
             f"inserted={result.inserted} updated={result.updated} "
@@ -420,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
                 x_max_pages=args.x_max_pages,
             )
             import_summary = store.upsert_bookmarks(batch.bookmarks)
+            _apply_xarchive_metadata(store, batch)
             imported = import_summary.imported
             classified = _classify(
                 store,
@@ -809,6 +812,43 @@ def _sync_bookmarks(
     batch.metadata["cursor_before"] = cursor or ""
     batch.metadata["cursor_after"] = batch.next_cursor or ""
     return batch
+
+
+def _apply_xarchive_metadata(store: BookmarkStore, batch: SyncBatch) -> int:
+    if batch.metadata.get("connector") != "xarchive-json":
+        return 0
+    updated = 0
+    for bookmark in batch.bookmarks:
+        row = store.get_bookmark(bookmark.tweet_id)
+        if row is None or row.get("category_source") == "manual":
+            continue
+        folders = _xarchive_folders(bookmark.raw or {})
+        if not folders:
+            continue
+        store.save_classification(
+            bookmark.tweet_id,
+            ClassificationResult(
+                category=folders[0],
+                tags=folders,
+                confidence=1.0,
+                reason="Imported from xarchive bookmark folders.",
+            ),
+            source="auto",
+        )
+        updated += 1
+    return updated
+
+
+def _xarchive_folders(raw: dict[str, object]) -> list[str]:
+    value = raw.get("folders")
+    if not isinstance(value, list):
+        return []
+    folders: list[str] = []
+    for item in value:
+        text = str(item).strip() if item is not None else ""
+        if text and text not in folders:
+            folders.append(text)
+    return folders
 
 
 def _capability_check(

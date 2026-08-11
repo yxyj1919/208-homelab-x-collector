@@ -9,12 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from .importer import load_bookmarks
+from .importer import load_bookmarks, load_xarchive_bookmarks
 from .models import Bookmark
 from .secrets import DEFAULT_SECRET_PATH, SecretStore
 
 
-CONNECTOR_NAMES = ("json-file", "x-api")
+CONNECTOR_NAMES = ("json-file", "xarchive-json", "x-api")
 DEFAULT_X_API_BASE_URL = "https://api.x.com"
 DEFAULT_X_API_PAGE_SIZE = 100
 DEFAULT_X_API_MAX_PAGES = 10
@@ -81,6 +81,26 @@ class JsonFileConnector:
             bookmarks=bookmarks,
             next_cursor=f"{stat.st_mtime_ns}:{stat.st_size}",
             metadata={"source_path": str(self.input_path)},
+        )
+
+
+class XArchiveJsonConnector:
+    name = "xarchive-json"
+
+    def __init__(self, input_path: Path) -> None:
+        self.input_path = input_path
+
+    def sync(self, cursor: str | None = None) -> SyncBatch:
+        del cursor
+        bookmarks = load_xarchive_bookmarks(self.input_path)
+        stat = self.input_path.stat()
+        return SyncBatch(
+            bookmarks=bookmarks,
+            next_cursor=f"{stat.st_mtime_ns}:{stat.st_size}",
+            metadata={
+                "source_path": str(self.input_path),
+                "result_count": str(len(bookmarks)),
+            },
         )
 
 
@@ -315,6 +335,10 @@ def build_connector(options: ConnectorOptions) -> BookmarkConnector:
         if options.input_path is None:
             raise ValueError("json-file connector requires --input")
         return JsonFileConnector(options.input_path)
+    if options.name == "xarchive-json":
+        if options.input_path is None:
+            raise ValueError("xarchive-json connector requires --input")
+        return XArchiveJsonConnector(options.input_path)
     if options.name == "x-api":
         if not options.x_user_id or not options.x_user_id.strip():
             raise ValueError("x-api connector requires --x-user-id")

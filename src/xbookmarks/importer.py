@@ -18,6 +18,23 @@ def load_bookmarks(path: Path) -> list[Bookmark]:
     return bookmarks
 
 
+def load_xarchive_bookmarks(path: Path) -> list[Bookmark]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("xarchive JSON input must be an object")
+    records = data.get("bookmarks")
+    if not isinstance(records, list):
+        raise ValueError("xarchive JSON input must contain a bookmarks array")
+    bookmarks: list[Bookmark] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        bookmark = _xarchive_record_to_bookmark(record)
+        if bookmark is not None:
+            bookmarks.append(bookmark)
+    return bookmarks
+
+
 def _extract_records(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
@@ -55,6 +72,24 @@ def _record_to_bookmark(record: dict[str, Any]) -> Bookmark | None:
         text=text,
         author=author,
         created_at=created_at,
+        raw=record,
+    )
+
+
+def _xarchive_record_to_bookmark(record: dict[str, Any]) -> Bookmark | None:
+    if record.get("status") == "unavailable":
+        return None
+    tweet_id = _first_text(record, "tweet_id", "id", "rest_id")
+    text = _first_text(record, "full_text", "text", "content")
+    if not tweet_id or not text:
+        return None
+
+    return Bookmark(
+        tweet_id=tweet_id,
+        url=_first_text(record, "url", "tweet_url") or f"https://x.com/i/status/{tweet_id}",
+        text=text,
+        author=_author_text(record),
+        created_at=_first_text(record, "created_at", "created", "date"),
         raw=record,
     )
 

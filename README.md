@@ -162,7 +162,7 @@ PYTHONPATH=src python3 -m xbookmarks.cli web --host 127.0.0.1 --port 8765
 ## Sync Connector
 
 导入和 `run` 流程现在通过 connector 获取收藏记录。当前实现的 connector 是
-`json-file`，它复用 JSON 导入能力，并把 connector 名称、源文件路径和文件游标写入
+`json-file` 和 `xarchive-json`。`json-file` 复用通用 JSON 导入能力，并把 connector 名称、源文件路径和文件游标写入
 `sync_state`：
 
 ```bash
@@ -173,6 +173,29 @@ python3 -m xbookmarks.cli sync-status
 
 这个抽象用于后续接入 X API / OAuth 或其他同步来源。分类、去重、人工分类保护和 HTML
 导出流程不依赖具体 connector。
+
+### xarchive JSON connector
+
+推荐优先使用 xarchive 路线导出完整 bookmarks，再交给本项目做 SQLite、分类、搜索和
+HTML 归档。xarchive JSON 顶层包含 `export_metadata`、`folders` 和 `bookmarks`；
+每条 bookmark 的 `folders` 会映射为本项目的 tags，第一个 folder 会作为初始
+category。已有 `manual` 分类不会被 xarchive folder 覆盖，完整原始对象会保存在
+`raw_json`。
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli run \
+  --connector xarchive-json \
+  --input real-bookmarks.json \
+  --archive-dir archive
+```
+
+只导入不分类/导出：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli import \
+  --connector xarchive-json \
+  real-bookmarks.json
+```
 
 ### X API OAuth connector
 
