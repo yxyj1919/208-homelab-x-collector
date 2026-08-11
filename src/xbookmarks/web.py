@@ -7,15 +7,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .storage import BookmarkStore
+from .services import BookmarkService
 
 
 def run_web_server(db_path: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
-    store = BookmarkStore(db_path)
-    store.init()
+    service = BookmarkService.from_db_path(db_path)
 
     class Handler(XBookmarksHandler):
-        bookmark_store = store
+        bookmark_service = service
 
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"Serving X Bookmarks UI at http://{host}:{port}")
@@ -26,7 +25,7 @@ def run_web_server(db_path: Path, host: str = "127.0.0.1", port: int = 8765) -> 
 
 
 class XBookmarksHandler(BaseHTTPRequestHandler):
-    bookmark_store: BookmarkStore
+    bookmark_service: BookmarkService
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -71,7 +70,7 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
         try:
             limit = _int_param(params, "limit", 50, minimum=1, maximum=200)
             offset = _int_param(params, "offset", 0, minimum=0, maximum=100000)
-            rows = self.bookmark_store.list_bookmarks(
+            payload = self.bookmark_service.list_bookmarks(
                 query=_first(params, "query"),
                 category=_first(params, "category"),
                 status=_first(params, "status"),
@@ -81,40 +80,25 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
-        self._send_json({"items": [_bookmark_payload(row) for row in rows]})
+        self._send_json(payload)
 
     def _handle_categories(self) -> None:
-        self._send_json(
-            {
-                "categories": [
-                    {"name": category, "count": count}
-                    for category, count in self.bookmark_store.category_counts()
-                ],
-                "statuses": self.bookmark_store.status_counts(),
-            }
-        )
+        self._send_json(self.bookmark_service.category_summary())
 
     def _handle_sync_status(self) -> None:
-        self._send_json(
-            {
-                "state": self.bookmark_store.sync_state(),
-                "latest_runs": self.bookmark_store.list_run_logs(limit=5),
-            }
-        )
+        self._send_json(self.bookmark_service.sync_status(latest_limit=5))
 
     def _handle_update_bookmark(self, tweet_id: str) -> None:
         try:
             payload = self._read_json()
-            updates = _bookmark_updates(payload)
-            self.bookmark_store.update_bookmark(tweet_id, **updates)
-            row = self.bookmark_store.get_bookmark(tweet_id)
+            response = self.bookmark_service.update_bookmark(tweet_id, payload)
         except KeyError as exc:
             self._send_error(HTTPStatus.NOT_FOUND, str(exc))
             return
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
-        self._send_json({"item": _bookmark_payload(row) if row else None})
+        self._send_json(response)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -167,65 +151,6 @@ def _int_param(
     if value < minimum or value > maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
-
-
-def _bookmark_updates(payload: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"category", "tags", "notes", "read_state", "important", "archived"}
-    unknown = sorted(set(payload) - allowed)
-    if unknown:
-        raise ValueError(f"Unsupported field(s): {', '.join(unknown)}")
-
-    updates: dict[str, Any] = {}
-    for key in ("category", "notes", "read_state"):
-        if key in payload:
-            value = payload[key]
-            if value is not None and not isinstance(value, str):
-                raise ValueError(f"{key} must be a string")
-            updates[key] = value or ""
-    if "tags" in payload:
-        tags = payload["tags"]
-        if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
-            raise ValueError("tags must be a list of strings")
-        updates["tags"] = [tag.strip() for tag in tags if tag.strip()]
-    for key in ("important", "archived"):
-        if key in payload:
-            if not isinstance(payload[key], bool):
-                raise ValueError(f"{key} must be a boolean")
-            updates[key] = payload[key]
-    return updates
-
-
-def _bookmark_payload(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "tweet_id": row["tweet_id"],
-        "url": row["url"],
-        "text": row["text"],
-        "author": row.get("author"),
-        "created_at": row.get("created_at"),
-        "category": row.get("category") or "Unclassified",
-        "category_source": row.get("category_source"),
-        "tags": _json_list(row.get("tags_json")),
-        "confidence": row.get("confidence"),
-        "reason": row.get("reason"),
-        "notes": row.get("notes") or "",
-        "read_state": row.get("read_state") or "unread",
-        "important": bool(row.get("important")),
-        "archived": bool(row.get("archived")),
-        "export_path": row.get("export_path"),
-        "updated_at": row.get("updated_at"),
-    }
-
-
-def _json_list(value: str | None) -> list[str]:
-    if not value:
-        return []
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return [value]
-    if isinstance(parsed, list):
-        return [str(item) for item in parsed]
-    return [str(parsed)]
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -342,12 +267,13 @@ INDEX_HTML = r"""<!doctype html>
 
     async function loadSyncStatus() {
       const body = await api("/api/sync-status");
-      const run = body.latest_runs[0];
-      if (!run) {
+      const summary = body.summary;
+      if (!summary) {
         sync.textContent = "No sync status";
         return;
       }
-      sync.textContent = `Last sync: ${run.status} · imported ${run.imported_count} · classified ${run.classified_count} · exported ${run.exported_count} · ${run.ended_at || run.started_at}`;
+      const more = summary.has_more ? " · more pages available" : "";
+      sync.textContent = `Last sync: ${summary.status} · ${summary.connector || "unknown"} · source ${summary.source_count} · inserted ${summary.inserted} · updated ${summary.updated} · unchanged ${summary.unchanged} · classified ${summary.classified} · exported ${summary.exported} · pages ${summary.pages_fetched}${more} · ${summary.finished_at || ""}`;
     }
 
     async function loadItems() {

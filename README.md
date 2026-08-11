@@ -127,6 +127,17 @@ PYTHONPATH=src python3 -m xbookmarks.cli search "VMware lifecycle"
 PYTHONPATH=src python3 -m xbookmarks.cli search Kubernetes --limit 10
 ```
 
+更新单条收藏的备注、标签和状态：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli --db data/bookmarks.sqlite update 1001 \
+  --notes "read later" \
+  --tags "vcf,homelab" \
+  --read-state read \
+  --important \
+  --no-archived
+```
+
 ## Local Web UI
 
 第一版本地 Web UI 只消费已经存在的 storage/search/sync 状态能力，不负责
@@ -218,7 +229,17 @@ PYTHONPATH=src python3 -m xbookmarks.cli run \
 - `--x-max-pages`：单次运行最多请求页数，默认 10。
 
 connector 会把 `x-api.cursor`、`x-api.pages_fetched`、`x-api.result_count` 和
-`x-api.has_more` 写入 `sync_state`。capability check 会写入
+`x-api.has_more` 写入 `sync_state`。`x-api.cursor` 有两种格式：
+
+- `page:<token>`：上次运行达到 `--x-max-pages` 上限，下一次从该分页 token 继续。
+- `tweet:<tweet_id>`：上次完整同步后的最新收藏水位，下一次从最新开始抓取，遇到该
+  tweet 后停止。
+
+`run-log` 会记录 connector、cursor 前后值、页数、源端返回数量、inserted、updated、
+unchanged、duplicates、classified、exported 和 `has_more`。UI 的最近同步状态也消费这份
+结构化摘要。
+
+capability check 会写入
 `x-api.capability.status`、`x-api.capability.endpoint` 和
 `x-api.capability.result_count`。
 

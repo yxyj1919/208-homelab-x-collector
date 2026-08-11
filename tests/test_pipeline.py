@@ -5,7 +5,7 @@ import os
 import sqlite3
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
@@ -25,6 +25,7 @@ from xbookmarks.connectors import (
 )
 from xbookmarks.models import Bookmark, ClassificationResult
 from xbookmarks.secrets import SecretStore
+from xbookmarks.services import BookmarkService
 from xbookmarks.storage import BookmarkStore
 from xbookmarks.web import XBookmarksHandler
 
@@ -62,14 +63,34 @@ class PipelineTest(unittest.TestCase):
                 self.assertEqual(total, 3)
                 run = conn.execute(
                     """
-                    SELECT status, imported_count, classified_count, exported_count,
-                           provider, model
+                    SELECT status, imported_count, inserted_count, updated_count,
+                           unchanged_count, duplicate_count, classified_count,
+                           exported_count, connector, pages_fetched,
+                           source_count, has_more, provider, model
                     FROM run_logs
                     ORDER BY id DESC
                     LIMIT 1
                     """
                 ).fetchone()
-                self.assertEqual(run, ("succeeded", 3, 3, 3, "rules", "rules"))
+                self.assertEqual(
+                    run,
+                    (
+                        "succeeded",
+                        3,
+                        3,
+                        0,
+                        0,
+                        0,
+                        3,
+                        3,
+                        "json-file",
+                        0,
+                        3,
+                        0,
+                        "rules",
+                        "rules",
+                    ),
+                )
 
     def test_export_removes_old_file_when_category_changes(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -238,6 +259,94 @@ class PipelineTest(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(category, "Programming")
             self.assertEqual(source, "auto")
+
+    def test_update_command_sets_notes_tags_and_status_fields(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            sample = base / "bookmark.json"
+            sample.write_text(
+                json.dumps([{"id": "9001", "text": "VMware lifecycle"}]),
+                encoding="utf-8",
+            )
+            main(["--db", str(db), "import", str(sample)])
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "--db",
+                        str(db),
+                        "update",
+                        "9001",
+                        "--tags",
+                        "vmware, homelab",
+                        "--notes",
+                        "read later",
+                        "--read-state",
+                        "read",
+                        "--important",
+                        "--archived",
+                    ]
+                )
+
+            with sqlite3.connect(db) as conn:
+                tags_json, notes, read_state, important, archived = conn.execute(
+                    """
+                    SELECT tags_json, notes, read_state, important, archived
+                    FROM bookmarks
+                    WHERE tweet_id = '9001'
+                    """
+                ).fetchone()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Updated bookmark 9001", output.getvalue())
+        self.assertEqual(json.loads(tags_json), ["vmware", "homelab"])
+        self.assertEqual(notes, "read later")
+        self.assertEqual(read_state, "read")
+        self.assertEqual(important, 1)
+        self.assertEqual(archived, 1)
+
+    def test_update_command_can_clear_boolean_flags(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            sample = base / "bookmark.json"
+            sample.write_text(
+                json.dumps([{"id": "9001", "text": "VMware lifecycle"}]),
+                encoding="utf-8",
+            )
+            main(["--db", str(db), "import", str(sample)])
+            main(["--db", str(db), "update", "9001", "--important", "--archived"])
+            main(
+                [
+                    "--db",
+                    str(db),
+                    "update",
+                    "9001",
+                    "--no-important",
+                    "--no-archived",
+                ]
+            )
+
+            with sqlite3.connect(db) as conn:
+                important, archived = conn.execute(
+                    """
+                    SELECT important, archived
+                    FROM bookmarks
+                    WHERE tweet_id = '9001'
+                    """
+                ).fetchone()
+
+        self.assertEqual(important, 0)
+        self.assertEqual(archived, 0)
+
+    def test_update_command_requires_at_least_one_field(self) -> None:
+        with redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                main(["--db", ":memory:", "update", "9001"])
+
+        self.assertEqual(ctx.exception.code, 2)
 
     def test_import_deduplicates_input_and_tracks_unchanged_records(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -468,6 +577,46 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual([row["tweet_id"] for row in by_archived], ["9001"])
         self.assertEqual([row["tweet_id"] for row in by_query], ["9001"])
 
+    def test_bookmark_service_normalizes_payloads_and_filters(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            service = BookmarkService(store)
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/example/status/9001",
+                        text="VMware lifecycle",
+                        author="vcf-admin",
+                    )
+                ]
+            )
+
+            patch_body = service.update_bookmark(
+                "9001",
+                {
+                    "category": "VCF",
+                    "tags": [" vmware ", "", "homelab"],
+                    "notes": "read later",
+                    "read_state": "read",
+                    "important": True,
+                    "archived": False,
+                },
+            )
+            list_body = service.list_bookmarks(category="VCF", status="important")
+
+        self.assertEqual(patch_body["item"]["category"], "VCF")
+        self.assertEqual(patch_body["item"]["tags"], ["vmware", "homelab"])
+        self.assertEqual(list_body["items"][0]["tweet_id"], "9001")
+
+    def test_bookmark_service_rejects_invalid_api_inputs(self) -> None:
+        service = BookmarkService(BookmarkStore(Path(":memory:")))
+
+        with self.assertRaisesRegex(ValueError, "Unsupported field"):
+            service.update_bookmark("9001", {"unknown": True})
+        with self.assertRaisesRegex(ValueError, "limit must be between"):
+            service.list_bookmarks(limit=0)
+
     def test_web_api_lists_and_updates_bookmarks(self) -> None:
         with TemporaryDirectory() as temp_dir:
             store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
@@ -483,7 +632,7 @@ class PipelineTest(unittest.TestCase):
             )
 
             class Handler(XBookmarksHandler):
-                bookmark_store = store
+                bookmark_service = BookmarkService(store)
 
             try:
                 server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -587,7 +736,7 @@ class StorageMigrationTest(unittest.TestCase):
         self.assertIn("read_state", columns)
         self.assertIn("important", columns)
         self.assertIn("archived", columns)
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6])
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7])
         self.assertIn("idx_bookmarks_category", indexes)
         self.assertIn("idx_bookmarks_created_at", indexes)
         self.assertIn("bookmarks_fts", tables)
@@ -600,7 +749,80 @@ class StorageMigrationTest(unittest.TestCase):
 
             version = store.schema_version()
 
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
+
+    def test_init_migrates_run_log_metadata_columns(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "bookmarks.sqlite"
+            with sqlite3.connect(db) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE bookmarks (
+                        tweet_id TEXT PRIMARY KEY,
+                        url TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        author TEXT,
+                        created_at TEXT,
+                        raw_json TEXT NOT NULL,
+                        category TEXT,
+                        category_source TEXT NOT NULL DEFAULT 'auto',
+                        tags_json TEXT NOT NULL DEFAULT '[]',
+                        confidence REAL,
+                        reason TEXT,
+                        notes TEXT,
+                        read_state TEXT NOT NULL DEFAULT 'unread',
+                        important INTEGER NOT NULL DEFAULT 0,
+                        archived INTEGER NOT NULL DEFAULT 0,
+                        export_path TEXT,
+                        imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE sync_state (
+                        name TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    INSERT INTO schema_migrations(version) VALUES (6);
+                    CREATE TABLE run_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        command TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        ended_at TEXT,
+                        input_path TEXT,
+                        archive_dir TEXT,
+                        provider TEXT,
+                        model TEXT,
+                        imported_count INTEGER NOT NULL DEFAULT 0,
+                        classified_count INTEGER NOT NULL DEFAULT 0,
+                        exported_count INTEGER NOT NULL DEFAULT 0,
+                        message TEXT
+                    );
+                    """
+                )
+
+            store = BookmarkStore(db)
+            store.init()
+
+            with sqlite3.connect(db) as conn:
+                columns = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(run_logs)").fetchall()
+                }
+                version = conn.execute(
+                    "SELECT MAX(version) FROM schema_migrations"
+                ).fetchone()[0]
+
+        self.assertEqual(version, 7)
+        self.assertIn("connector", columns)
+        self.assertIn("cursor_before", columns)
+        self.assertIn("cursor_after", columns)
+        self.assertIn("inserted_count", columns)
+        self.assertIn("has_more", columns)
 
     def test_run_logs_failed_run(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -618,6 +840,7 @@ class StorageMigrationTest(unittest.TestCase):
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["status"], "failed")
         self.assertIn("missing.json", logs[0]["message"])
+        self.assertEqual(logs[0]["connector"], "json-file")
         self.assertEqual(state["last_run_status"], "failed")
 
     def test_sync_status_and_run_log_commands_report_latest_run(self) -> None:
@@ -650,8 +873,27 @@ class StorageMigrationTest(unittest.TestCase):
 
         self.assertIn("last_run_status=succeeded", status_output.getvalue())
         self.assertIn("latest_run=id=1 status=succeeded command=run", status_output.getvalue())
+        self.assertIn("connector=json-file", status_output.getvalue())
+        self.assertIn("inserted=3", status_output.getvalue())
         self.assertIn("1\tsucceeded\trun", log_output.getvalue())
         self.assertIn("imported=3", log_output.getvalue())
+        self.assertIn("inserted=3", log_output.getvalue())
+
+    def test_sync_status_service_returns_structured_summary(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        sample = root / "samples" / "bookmarks.json"
+
+        with TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "bookmarks.sqlite"
+            main(["--db", str(db), "run", "--input", str(sample)])
+
+            status = BookmarkService(BookmarkStore(db)).sync_status()
+
+        self.assertEqual(status["summary"]["status"], "succeeded")
+        self.assertEqual(status["summary"]["connector"], "json-file")
+        self.assertEqual(status["summary"]["inserted"], 3)
+        self.assertEqual(status["summary"]["source_count"], 3)
+        self.assertFalse(status["summary"]["has_more"])
 
 
 class ConnectorTest(unittest.TestCase):
@@ -749,7 +991,7 @@ class ConnectorTest(unittest.TestCase):
 
         self.assertEqual([bookmark.tweet_id for bookmark in batch.bookmarks], ["1001", "1002"])
         self.assertEqual(batch.bookmarks[0].author, "xdev")
-        self.assertIsNone(batch.next_cursor)
+        self.assertEqual(batch.next_cursor, "tweet:1001")
         self.assertEqual(batch.metadata["pages_fetched"], "2")
         self.assertEqual(
             client.calls,
@@ -788,9 +1030,37 @@ class ConnectorTest(unittest.TestCase):
 
         batch = connector.sync(cursor="START")
 
-        self.assertEqual(batch.next_cursor, "NEXT")
+        self.assertEqual(batch.next_cursor, "page:NEXT")
         self.assertEqual(batch.metadata["has_more"], "true")
         self.assertEqual(client.calls[0]["pagination_token"], "START")
+
+    def test_x_api_connector_stops_when_incremental_cursor_is_reached(self) -> None:
+        client = FakeXApiClient(
+            [
+                {
+                    "data": [
+                        {"id": "1003", "text": "New VMware note"},
+                        {"id": "1002", "text": "Previously seen note"},
+                        {"id": "1001", "text": "Older note"},
+                    ],
+                    "meta": {"result_count": 3},
+                }
+            ]
+        )
+        connector = XApiConnector(
+            user_id="12345",
+            credential_manager=FakeCredentialManager("ignored"),
+            page_size=10,
+            max_pages=5,
+            client=client,
+        )
+
+        batch = connector.sync(cursor="tweet:1002")
+
+        self.assertEqual([bookmark.tweet_id for bookmark in batch.bookmarks], ["1003"])
+        self.assertEqual(batch.next_cursor, "tweet:1003")
+        self.assertEqual(batch.metadata["reached_cursor"], "true")
+        self.assertEqual(batch.metadata["has_more"], "false")
 
     def test_x_api_connector_identifies_auth_errors(self) -> None:
         connector = XApiConnector(

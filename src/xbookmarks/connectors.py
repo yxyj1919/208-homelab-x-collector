@@ -108,9 +108,12 @@ class XApiConnector:
 
     def sync(self, cursor: str | None = None) -> SyncBatch:
         bookmarks: list[Bookmark] = []
-        next_token = cursor or None
+        pagination_cursor, high_watermark = _parse_x_api_cursor(cursor)
+        next_token = pagination_cursor
+        first_seen_id: str | None = None
         pages_fetched = 0
         result_count = 0
+        reached_cursor = False
         for _ in range(self.max_pages):
             payload = self._get_bookmarks_with_refresh(
                 max_results=self.page_size, pagination_token=next_token
@@ -120,6 +123,11 @@ class XApiConnector:
             for record in _x_records(payload):
                 bookmark = _x_record_to_bookmark(record, payload)
                 if bookmark is not None:
+                    if first_seen_id is None:
+                        first_seen_id = bookmark.tweet_id
+                    if high_watermark and bookmark.tweet_id == high_watermark:
+                        reached_cursor = True
+                        break
                     bookmarks.append(bookmark)
             meta = payload.get("meta")
             if isinstance(meta, dict):
@@ -127,17 +135,27 @@ class XApiConnector:
                 next_token = _clean_text(meta.get("next_token"))
             else:
                 next_token = None
+            if reached_cursor:
+                next_token = None
+                break
             if not next_token:
                 break
+        if next_token:
+            next_cursor = f"page:{next_token}"
+            has_more = "true"
+        elif first_seen_id:
+            next_cursor = f"tweet:{first_seen_id}"
+            has_more = "false"
+        else:
+            next_cursor = cursor
+            has_more = "false"
         metadata = {
             "pages_fetched": str(pages_fetched),
             "result_count": str(result_count),
+            "reached_cursor": "true" if reached_cursor else "false",
         }
-        if next_token:
-            metadata["has_more"] = "true"
-        else:
-            metadata["has_more"] = "false"
-        return SyncBatch(bookmarks=bookmarks, next_cursor=next_token, metadata=metadata)
+        metadata["has_more"] = has_more
+        return SyncBatch(bookmarks=bookmarks, next_cursor=next_cursor, metadata=metadata)
 
     def capability_check(self) -> SyncBatch:
         payload = self._get_bookmarks_with_refresh(max_results=1, pagination_token=None)
@@ -334,6 +352,19 @@ def _x_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(data, list):
         return []
     return [item for item in data if isinstance(item, dict)]
+
+
+def _parse_x_api_cursor(cursor: str | None) -> tuple[str | None, str | None]:
+    value = _clean_text(cursor)
+    if not value:
+        return None, None
+    if value.startswith("page:"):
+        token = value[len("page:") :].strip()
+        return token or None, None
+    if value.startswith("tweet:"):
+        tweet_id = value[len("tweet:") :].strip()
+        return None, tweet_id or None
+    return value, None
 
 
 def _x_record_to_bookmark(

@@ -25,7 +25,6 @@ from .connectors import (
     build_connector,
 )
 from .exporter import export_html
-from .models import ClassificationResult
 from .providers import (
     PROVIDER_NAMES,
     ProviderOptions,
@@ -33,6 +32,7 @@ from .providers import (
     build_provider,
 )
 from .secrets import DEFAULT_SECRET_PATH, SecretStore
+from .services import BookmarkService
 from .storage import BookmarkStore
 from .web import run_web_server
 
@@ -123,6 +123,28 @@ def main(argv: list[str] | None = None) -> int:
         "--archive-dir",
         type=Path,
         help="Re-export HTML archive after changing the category.",
+    )
+
+    update_parser = subparsers.add_parser("update")
+    update_parser.add_argument("tweet_id")
+    update_parser.add_argument("--category")
+    update_parser.add_argument("--tags")
+    update_parser.add_argument("--notes")
+    update_parser.add_argument("--read-state", choices=("read", "unread"))
+    update_parser.add_argument(
+        "--important",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    update_parser.add_argument(
+        "--archived",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    update_parser.add_argument(
+        "--archive-dir",
+        type=Path,
+        help="Re-export HTML archive after updating bookmark metadata.",
     )
 
     export_parser = subparsers.add_parser("export-html")
@@ -304,19 +326,36 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "set-category":
         tags = [tag.strip() for tag in args.tags.split(",") if tag.strip()]
-        store.save_classification(
+        BookmarkService(store).set_bookmark_category(
             args.tweet_id,
-            ClassificationResult(
-                category=args.category,
-                tags=tags,
-                confidence=1.0,
-                reason=args.reason,
-            ),
-            source="manual",
+            args.category,
+            tags=tags,
+            reason=args.reason,
         )
         if args.archive_dir:
             export_html(store, args.archive_dir)
         print(f"Updated category for {args.tweet_id}: {args.category}")
+        return 0
+
+    if args.command == "update":
+        payload = _bookmark_update_payload(args)
+        if not payload:
+            parser.error(
+                "update requires at least one of --category, --tags, --notes, "
+                "--read-state, --important/--no-important, or "
+                "--archived/--no-archived"
+            )
+        response = BookmarkService(store).update_bookmark(args.tweet_id, payload)
+        if args.archive_dir:
+            export_html(store, args.archive_dir)
+        item = response["item"] or {}
+        print(
+            f"Updated bookmark {args.tweet_id}: "
+            f"category={item.get('category', '')} "
+            f"read_state={item.get('read_state', '')} "
+            f"important={item.get('important', '')} "
+            f"archived={item.get('archived', '')}"
+        )
         return 0
 
     if args.command == "export-html":
@@ -352,10 +391,13 @@ def main(argv: list[str] | None = None) -> int:
             args.ollama_url,
             args.ollama_timeout,
         )
+        cursor_before = store.sync_state().get(f"{args.connector}.cursor")
         run_id = store.begin_run(
             "run",
             input_path=args.input,
             archive_dir=args.archive_dir,
+            connector=args.connector,
+            cursor_before=cursor_before,
             provider=provider_instance.name,
             model=provider_instance.model_label,
         )
@@ -363,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
         import_summary = None
         classified = 0
         exported = 0
+        batch: SyncBatch | None = None
         try:
             batch = _sync_bookmarks(
                 store,
@@ -398,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
                 imported_count=imported,
                 classified_count=classified,
                 exported_count=exported,
+                **_run_log_sync_fields(batch, import_summary),
                 message=str(exc),
             )
             raise
@@ -407,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
             imported_count=imported,
             classified_count=classified,
             exported_count=exported,
+            **_run_log_sync_fields(batch, import_summary),
         )
         import_details = ""
         if import_summary is not None:
@@ -435,6 +480,13 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "latest_run="
                 f"id={run['id']} status={run['status']} command={run['command']} "
+                f"connector={run['connector'] or ''} "
+                f"imported={run['imported_count']} "
+                f"inserted={run['inserted_count']} "
+                f"updated={run['updated_count']} "
+                f"unchanged={run['unchanged_count']} "
+                f"duplicates={run['duplicate_count']} "
+                f"pages={run['pages_fetched']} has_more={bool(run['has_more'])} "
                 f"started_at={run['started_at']} ended_at={run['ended_at']}"
             )
         return 0
@@ -451,9 +503,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"{row['id']}\t{row['status']}\t{row['command']}\t"
                 f"started={row['started_at']}\tended={row['ended_at']}\t"
                 f"provider={row['provider'] or ''}\tmodel={row['model'] or ''}\t"
+                f"connector={row['connector'] or ''}\t"
+                f"pages={row['pages_fetched']}\t"
+                f"source={row['source_count']}\t"
                 f"imported={row['imported_count']}\t"
+                f"inserted={row['inserted_count']}\t"
+                f"updated={row['updated_count']}\t"
+                f"unchanged={row['unchanged_count']}\t"
+                f"duplicates={row['duplicate_count']}\t"
                 f"classified={row['classified_count']}\t"
                 f"exported={row['exported_count']}\t"
+                f"has_more={bool(row['has_more'])}\t"
                 f"message={row['message'] or ''}"
             )
         return 0
@@ -659,6 +719,23 @@ def _parse_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _bookmark_update_payload(args: argparse.Namespace) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    if args.category is not None:
+        payload["category"] = args.category
+    if args.tags is not None:
+        payload["tags"] = _parse_csv(args.tags)
+    if args.notes is not None:
+        payload["notes"] = args.notes
+    if args.read_state is not None:
+        payload["read_state"] = args.read_state
+    if args.important is not None:
+        payload["important"] = args.important
+    if args.archived is not None:
+        payload["archived"] = args.archived
+    return payload
+
+
 def _json_list(value: str | None) -> list[str]:
     if not value:
         return []
@@ -728,6 +805,9 @@ def _sync_bookmarks(
     store.set_sync_state(f"{connector.name}.cursor", batch.next_cursor or "")
     for key, value in sorted(batch.metadata.items()):
         store.set_sync_state(f"{connector.name}.{key}", value)
+    batch.metadata["connector"] = connector.name
+    batch.metadata["cursor_before"] = cursor or ""
+    batch.metadata["cursor_after"] = batch.next_cursor or ""
     return batch
 
 
@@ -769,6 +849,31 @@ def _capability_check(
     for key, value in sorted(batch.metadata.items()):
         store.set_sync_state(f"{connector.name}.capability.{key}", value)
     return batch
+
+
+def _run_log_sync_fields(
+    batch: SyncBatch | None,
+    import_summary: object | None,
+) -> dict[str, object]:
+    metadata = batch.metadata if batch is not None else {}
+    return {
+        "cursor_after": metadata.get("cursor_after") or None,
+        "pages_fetched": _int_metadata(metadata, "pages_fetched"),
+        "source_count": _int_metadata(metadata, "result_count")
+        or (len(batch.bookmarks) if batch is not None else 0),
+        "inserted_count": getattr(import_summary, "inserted", 0) or 0,
+        "updated_count": getattr(import_summary, "updated", 0) or 0,
+        "unchanged_count": getattr(import_summary, "unchanged", 0) or 0,
+        "duplicate_count": getattr(import_summary, "duplicates", 0) or 0,
+        "has_more": str(metadata.get("has_more", "")).lower() == "true",
+    }
+
+
+def _int_metadata(metadata: dict[str, str], name: str) -> int:
+    try:
+        return int(metadata.get(name, "0") or "0")
+    except ValueError:
+        return 0
 
 
 def _load_category_config_or_empty(path: Path) -> dict[str, CategoryDefinition]:

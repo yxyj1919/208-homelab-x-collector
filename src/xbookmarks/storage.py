@@ -10,7 +10,7 @@ from typing import Iterable
 from .models import Bookmark, ClassificationResult
 
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -72,6 +72,16 @@ CREATE TABLE IF NOT EXISTS run_logs (
     ended_at TEXT,
     input_path TEXT,
     archive_dir TEXT,
+    connector TEXT,
+    cursor_before TEXT,
+    cursor_after TEXT,
+    pages_fetched INTEGER NOT NULL DEFAULT 0,
+    source_count INTEGER NOT NULL DEFAULT 0,
+    inserted_count INTEGER NOT NULL DEFAULT 0,
+    updated_count INTEGER NOT NULL DEFAULT 0,
+    unchanged_count INTEGER NOT NULL DEFAULT 0,
+    duplicate_count INTEGER NOT NULL DEFAULT 0,
+    has_more INTEGER NOT NULL DEFAULT 0,
     provider TEXT,
     model TEXT,
     imported_count INTEGER NOT NULL DEFAULT 0,
@@ -136,6 +146,10 @@ class BookmarkStore:
         if version < 6:
             self._migrate_to_v6(conn)
             self._record_migration(conn, 6)
+            version = 6
+        if version < 7:
+            self._migrate_to_v7(conn)
+            self._record_migration(conn, 7)
 
     def _migrate_to_v2(self, conn: sqlite3.Connection) -> None:
         columns = self._bookmark_columns(conn)
@@ -307,6 +321,24 @@ class BookmarkStore:
             """
         )
 
+    def _migrate_to_v7(self, conn: sqlite3.Connection) -> None:
+        columns = self._run_log_columns(conn)
+        migrations = {
+            "connector": "TEXT",
+            "cursor_before": "TEXT",
+            "cursor_after": "TEXT",
+            "pages_fetched": "INTEGER NOT NULL DEFAULT 0",
+            "source_count": "INTEGER NOT NULL DEFAULT 0",
+            "inserted_count": "INTEGER NOT NULL DEFAULT 0",
+            "updated_count": "INTEGER NOT NULL DEFAULT 0",
+            "unchanged_count": "INTEGER NOT NULL DEFAULT 0",
+            "duplicate_count": "INTEGER NOT NULL DEFAULT 0",
+            "has_more": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in migrations.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE run_logs ADD COLUMN {name} {definition}")
+
     def _schema_version(self, conn: sqlite3.Connection) -> int:
         exists = conn.execute(
             """
@@ -332,6 +364,12 @@ class BookmarkStore:
         return {
             str(row["name"])
             for row in conn.execute("PRAGMA table_info(bookmarks)").fetchall()
+        }
+
+    def _run_log_columns(self, conn: sqlite3.Connection) -> set[str]:
+        return {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(run_logs)").fetchall()
         }
 
     def upsert_bookmarks(self, bookmarks: Iterable[Bookmark]) -> ImportResult:
@@ -725,6 +763,8 @@ class BookmarkStore:
         command: str,
         input_path: Path | None = None,
         archive_dir: Path | None = None,
+        connector: str | None = None,
+        cursor_before: str | None = None,
         provider: str | None = None,
         model: str | None = None,
     ) -> int:
@@ -733,14 +773,17 @@ class BookmarkStore:
             cursor = conn.execute(
                 """
                 INSERT INTO run_logs (
-                    command, status, input_path, archive_dir, provider, model
+                    command, status, input_path, archive_dir, connector,
+                    cursor_before, provider, model
                 )
-                VALUES (?, 'running', ?, ?, ?, ?)
+                VALUES (?, 'running', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     command,
                     str(input_path) if input_path else None,
                     str(archive_dir) if archive_dir else None,
+                    connector,
+                    cursor_before,
                     provider,
                     model,
                 ),
@@ -758,6 +801,14 @@ class BookmarkStore:
         imported_count: int = 0,
         classified_count: int = 0,
         exported_count: int = 0,
+        cursor_after: str | None = None,
+        pages_fetched: int = 0,
+        source_count: int = 0,
+        inserted_count: int = 0,
+        updated_count: int = 0,
+        unchanged_count: int = 0,
+        duplicate_count: int = 0,
+        has_more: bool = False,
         message: str | None = None,
     ) -> None:
         with self.connect() as conn:
@@ -766,6 +817,9 @@ class BookmarkStore:
                 UPDATE run_logs
                 SET status = ?, ended_at = CURRENT_TIMESTAMP,
                     imported_count = ?, classified_count = ?, exported_count = ?,
+                    cursor_after = ?, pages_fetched = ?, source_count = ?,
+                    inserted_count = ?, updated_count = ?, unchanged_count = ?,
+                    duplicate_count = ?, has_more = ?,
                     message = ?
                 WHERE id = ?
                 """,
@@ -774,6 +828,14 @@ class BookmarkStore:
                     imported_count,
                     classified_count,
                     exported_count,
+                    cursor_after,
+                    pages_fetched,
+                    source_count,
+                    inserted_count,
+                    updated_count,
+                    unchanged_count,
+                    duplicate_count,
+                    1 if has_more else 0,
                     message,
                     run_id,
                 ),
@@ -790,7 +852,10 @@ class BookmarkStore:
             rows = conn.execute(
                 """
                 SELECT id, command, status, started_at, ended_at, input_path,
-                       archive_dir, provider, model, imported_count,
+                       archive_dir, connector, cursor_before, cursor_after,
+                       pages_fetched, source_count, inserted_count,
+                       updated_count, unchanged_count, duplicate_count,
+                       has_more, provider, model, imported_count,
                        classified_count, exported_count, message
                 FROM run_logs
                 ORDER BY id DESC
