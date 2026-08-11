@@ -10,7 +10,7 @@ from typing import Iterable
 from .models import Bookmark, ClassificationResult
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     tags_json TEXT NOT NULL DEFAULT '[]',
     confidence REAL,
     reason TEXT,
+    notes TEXT,
     export_path TEXT,
     first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -74,6 +75,16 @@ CREATE TABLE IF NOT EXISTS run_logs (
     classified_count INTEGER NOT NULL DEFAULT 0,
     exported_count INTEGER NOT NULL DEFAULT 0,
     message TEXT
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+    tweet_id UNINDEXED,
+    text,
+    author,
+    url,
+    category,
+    tags,
+    notes
 );
 """
 
@@ -114,6 +125,10 @@ class BookmarkStore:
         if version < 4:
             self._migrate_to_v4(conn)
             self._record_migration(conn, 4)
+            version = 4
+        if version < 5:
+            self._migrate_to_v5(conn)
+            self._record_migration(conn, 5)
 
     def _migrate_to_v2(self, conn: sqlite3.Connection) -> None:
         columns = self._bookmark_columns(conn)
@@ -230,6 +245,25 @@ class BookmarkStore:
             """
         )
 
+    def _migrate_to_v5(self, conn: sqlite3.Connection) -> None:
+        columns = self._bookmark_columns(conn)
+        if "notes" not in columns:
+            conn.execute("ALTER TABLE bookmarks ADD COLUMN notes TEXT")
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+                tweet_id UNINDEXED,
+                text,
+                author,
+                url,
+                category,
+                tags,
+                notes
+            )
+            """
+        )
+        self._rebuild_search_index(conn)
+
     def _schema_version(self, conn: sqlite3.Connection) -> int:
         exists = conn.execute(
             """
@@ -306,6 +340,7 @@ class BookmarkStore:
                             content_hash,
                         ),
                     )
+                    self._sync_search_index(conn, bookmark.tweet_id)
                     inserted += 1
                     continue
 
@@ -318,6 +353,7 @@ class BookmarkStore:
                         """,
                         (bookmark.tweet_id,),
                     )
+                    self._sync_search_index(conn, bookmark.tweet_id)
                     unchanged += 1
                     continue
 
@@ -351,6 +387,7 @@ class BookmarkStore:
                         bookmark.tweet_id,
                     ),
                 )
+                self._sync_search_index(conn, bookmark.tweet_id)
                 updated += 1
         unique_seen = len(by_id)
         return ImportResult(
@@ -389,7 +426,8 @@ class BookmarkStore:
                 f"""
                 SELECT tweet_id, url, text, author, created_at, content_hash,
                        change_count, first_seen_at, last_seen_at, category,
-                       category_source, tags_json, confidence, reason, export_path
+                       category_source, tags_json, confidence, reason, notes,
+                       export_path
                 FROM bookmarks
                 {where}
                 ORDER BY COALESCE(created_at, imported_at) DESC, tweet_id DESC
@@ -421,6 +459,7 @@ class BookmarkStore:
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"Bookmark not found: {tweet_id}")
+            self._sync_search_index(conn, tweet_id)
 
     def save_export_path(self, tweet_id: str, export_path: Path) -> None:
         with self.connect() as conn:
@@ -432,6 +471,45 @@ class BookmarkStore:
                 """,
                 (str(export_path), tweet_id),
             )
+
+    def save_notes(self, tweet_id: str, notes: str) -> None:
+        self.init()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE bookmarks
+                SET notes = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE tweet_id = ?
+                """,
+                (notes, tweet_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"Bookmark not found: {tweet_id}")
+            self._sync_search_index(conn, tweet_id)
+
+    def search_bookmarks(self, query: str, limit: int = 20) -> list[dict]:
+        self.init()
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        fts_query = _fts_query(query)
+        if not fts_query:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT b.tweet_id, b.url, b.text, b.author, b.created_at,
+                       b.category, b.category_source, b.tags_json, b.confidence,
+                       b.notes, bm25(bookmarks_fts) AS rank
+                FROM bookmarks_fts
+                JOIN bookmarks AS b ON b.tweet_id = bookmarks_fts.tweet_id
+                WHERE bookmarks_fts MATCH ?
+                ORDER BY rank, COALESCE(b.created_at, b.imported_at) DESC,
+                         b.tweet_id DESC
+                LIMIT ?
+                """,
+                (fts_query, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def set_sync_state(self, name: str, value: str) -> None:
         self.init()
@@ -549,6 +627,42 @@ class BookmarkStore:
             (name, value),
         )
 
+    def _sync_search_index(self, conn: sqlite3.Connection, tweet_id: str) -> None:
+        row = conn.execute(
+            """
+            SELECT tweet_id, text, author, url, category, tags_json, notes
+            FROM bookmarks
+            WHERE tweet_id = ?
+            """,
+            (tweet_id,),
+        ).fetchone()
+        conn.execute("DELETE FROM bookmarks_fts WHERE tweet_id = ?", (tweet_id,))
+        if row is None:
+            return
+        conn.execute(
+            """
+            INSERT INTO bookmarks_fts (
+                tweet_id, text, author, url, category, tags, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["tweet_id"],
+                row["text"] or "",
+                row["author"] or "",
+                row["url"] or "",
+                row["category"] or "",
+                _tags_text(row["tags_json"]),
+                row["notes"] or "",
+            ),
+        )
+
+    def _rebuild_search_index(self, conn: sqlite3.Connection) -> None:
+        conn.execute("DELETE FROM bookmarks_fts")
+        rows = conn.execute("SELECT tweet_id FROM bookmarks").fetchall()
+        for row in rows:
+            self._sync_search_index(conn, str(row["tweet_id"]))
+
     def stats(self) -> dict[str, int]:
         self.init()
         with self.connect() as conn:
@@ -604,3 +718,20 @@ def _canonical_raw_json(raw_json: str) -> object:
         return json.loads(raw_json)
     except json.JSONDecodeError:
         return raw_json
+
+
+def _tags_text(tags_json: str | None) -> str:
+    if not tags_json:
+        return ""
+    try:
+        parsed = json.loads(tags_json)
+    except json.JSONDecodeError:
+        return str(tags_json)
+    if isinstance(parsed, list):
+        return " ".join(str(tag) for tag in parsed)
+    return str(parsed)
+
+
+def _fts_query(query: str) -> str:
+    terms = [term.strip() for term in query.split() if term.strip()]
+    return " ".join(f'"{term.replace(chr(34), chr(34) + chr(34))}"' for term in terms)

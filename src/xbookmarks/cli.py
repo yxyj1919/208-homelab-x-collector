@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -125,6 +126,10 @@ def main(argv: list[str] | None = None) -> int:
 
     export_parser = subparsers.add_parser("export-html")
     export_parser.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE)
+
+    search_parser = subparsers.add_parser("search")
+    search_parser.add_argument("query")
+    search_parser.add_argument("--limit", type=int, default=20)
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--input", type=Path)
@@ -312,6 +317,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "export-html":
         count = export_html(store, args.archive_dir)
         print(f"Exported {count} bookmark HTML file(s) to {args.archive_dir}.")
+        return 0
+
+    if args.command == "search":
+        if args.limit < 1:
+            parser.error("--limit must be at least 1")
+        rows = store.search_bookmarks(args.query, limit=args.limit)
+        if not rows:
+            print("No matching bookmarks.")
+            return 0
+        for row in rows:
+            tags = ", ".join(_json_list(row["tags_json"]))
+            text = _one_line(row["text"], max_length=120)
+            print(
+                f"{row['tweet_id']}\t"
+                f"category={row['category'] or 'Unclassified'}\t"
+                f"author={row['author'] or ''}\t"
+                f"tags={tags}\t"
+                f"url={row['url']}\t"
+                f"text={text}"
+            )
         return 0
 
     if args.command == "run":
@@ -621,6 +646,25 @@ def _parse_csv(value: str | None) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return [value]
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed]
+    return [str(parsed)]
+
+
+def _one_line(value: str | None, max_length: int) -> str:
+    text = " ".join((value or "").split())
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 1] + "..."
 
 
 def _secret_arg(value: str | None, file_path: Path | None) -> str | None:

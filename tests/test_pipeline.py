@@ -20,6 +20,7 @@ from xbookmarks.connectors import (
     build_connector,
     read_bearer_token,
 )
+from xbookmarks.models import Bookmark, ClassificationResult
 from xbookmarks.secrets import SecretStore
 from xbookmarks.storage import BookmarkStore
 
@@ -364,9 +365,74 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(source, "manual")
         self.assertEqual(change_count, 1)
 
+    def test_search_command_uses_full_text_index(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            sample = base / "bookmark.json"
+            sample.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "9001",
+                            "text": "VMware Cloud Foundation lifecycle note",
+                            "author": "vcf-admin",
+                            "created_at": "2026-08-10T10:00:00Z",
+                        },
+                        {
+                            "id": "9002",
+                            "text": "Python programming",
+                            "author": "dev",
+                            "created_at": "2026-08-10T11:00:00Z",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            main(["--db", str(db), "run", "--input", str(sample)])
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["--db", str(db), "search", "lifecycle"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("9001", output.getvalue())
+        self.assertNotIn("9002", output.getvalue())
+
+    def test_search_indexes_category_tags_and_notes(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/example/status/9001",
+                        text="Release detail",
+                    )
+                ]
+            )
+            store.save_classification(
+                "9001",
+                ClassificationResult(
+                    category="Kubernetes",
+                    tags=["vks", "homelab"],
+                    confidence=0.9,
+                    reason="test",
+                ),
+            )
+            store.save_notes("9001", "Obsidian follow up")
+
+            by_category = store.search_bookmarks("Kubernetes")
+            by_tag = store.search_bookmarks("homelab")
+            by_note = store.search_bookmarks("Obsidian")
+
+        self.assertEqual([row["tweet_id"] for row in by_category], ["9001"])
+        self.assertEqual([row["tweet_id"] for row in by_tag], ["9001"])
+        self.assertEqual([row["tweet_id"] for row in by_note], ["9001"])
+
 
 class StorageMigrationTest(unittest.TestCase):
-    def test_init_migrates_v1_database_to_v2(self) -> None:
+    def test_init_migrates_v1_database_to_current_schema(self) -> None:
         with TemporaryDirectory() as temp_dir:
             db = Path(temp_dir) / "bookmarks.sqlite"
             with sqlite3.connect(db) as conn:
@@ -413,15 +479,27 @@ class StorageMigrationTest(unittest.TestCase):
                 indexes = {
                     row[1] for row in conn.execute("PRAGMA index_list(bookmarks)")
                 }
+                tables = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
                 category_source = conn.execute(
                     "SELECT category_source FROM bookmarks WHERE tweet_id = '1001'"
                 ).fetchone()[0]
+                search_count = conn.execute(
+                    "SELECT COUNT(*) FROM bookmarks_fts WHERE bookmarks_fts MATCH 'VMware'"
+                ).fetchone()[0]
 
         self.assertIn("category_source", columns)
-        self.assertEqual(versions, [1, 2, 3, 4])
+        self.assertIn("notes", columns)
+        self.assertEqual(versions, [1, 2, 3, 4, 5])
         self.assertIn("idx_bookmarks_category", indexes)
         self.assertIn("idx_bookmarks_created_at", indexes)
+        self.assertIn("bookmarks_fts", tables)
         self.assertEqual(category_source, "auto")
+        self.assertEqual(search_count, 1)
 
     def test_new_database_initializes_at_current_schema_version(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -429,7 +507,7 @@ class StorageMigrationTest(unittest.TestCase):
 
             version = store.schema_version()
 
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
 
     def test_run_logs_failed_run(self) -> None:
         with TemporaryDirectory() as temp_dir:

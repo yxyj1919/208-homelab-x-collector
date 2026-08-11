@@ -30,7 +30,22 @@ v0.1.0 是 JSON 导入版 MVP，适合作为本地收藏归档工具的第一版
 - X API / OAuth 集成。
 - 定时任务安装脚本。
 - Web UI。
+- Obsidian / Markdown 导出。
 - 多用户或远端服务部署。
+
+后续 Obsidian / Markdown 导出需要等数据模型稳定后再做。Markdown front matter
+字段固定为：
+
+- `tweet_id`
+- `url`
+- `author`
+- `created_at`
+- `category`
+- `tags`
+- `source`
+- `provider`
+- `confidence`
+- `read_state`
 
 推荐运行顺序：
 
@@ -104,6 +119,14 @@ python3 -m xbookmarks.cli export-html
 
 导入时会按 `tweet_id` 去重，并用内容 hash 检测同一收藏是否发生变化。输出中的
 `inserted`、`updated`、`unchanged` 和 `duplicates` 可用于确认增量导入效果。
+
+全文搜索使用 SQLite FTS5，而不是普通 `LIKE`。搜索字段包括 `text`、`author`、
+`url`、`category`、`tags` 和 `notes`：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli search "VMware lifecycle"
+PYTHONPATH=src python3 -m xbookmarks.cli search Kubernetes --limit 10
+```
 
 ## Sync Connector
 
