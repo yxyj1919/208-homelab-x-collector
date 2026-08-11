@@ -105,6 +105,84 @@ python3 -m xbookmarks.cli export-html
 导入时会按 `tweet_id` 去重，并用内容 hash 检测同一收藏是否发生变化。输出中的
 `inserted`、`updated`、`unchanged` 和 `duplicates` 可用于确认增量导入效果。
 
+## Sync Connector
+
+导入和 `run` 流程现在通过 connector 获取收藏记录。当前实现的 connector 是
+`json-file`，它复用 JSON 导入能力，并把 connector 名称、源文件路径和文件游标写入
+`sync_state`：
+
+```bash
+python3 -m xbookmarks.cli import samples/bookmarks.json --connector json-file
+python3 -m xbookmarks.cli run --input samples/bookmarks.json --connector json-file
+python3 -m xbookmarks.cli sync-status
+```
+
+这个抽象用于后续接入 X API / OAuth 或其他同步来源。分类、去重、人工分类保护和 HTML
+导出流程不依赖具体 connector。
+
+### X API OAuth connector
+
+`x-api` connector 使用 X API v2 的 authenticated-user bookmarks endpoint：
+`GET /2/users/{id}/bookmarks`。这是正规同步路线，但依赖 X API 权限、价格计划和
+endpoint 可用性。因此完整同步前必须先跑 capability check。
+X API 当前按用量计费，具体 endpoint 价格和 credit 消耗应以 Developer Console 为准；
+capability check 只验证认证、scope 和 endpoint 是否可用，不替代费用确认。
+
+推荐顺序：
+
+1. 通过 OAuth 2.0 Authorization Code with PKCE 获取 user access token。
+2. 如果需要自动刷新 token，授权 scope 必须包含 `offline.access`，并保存
+   `refresh_token` 和 `client_id`。
+3. 把 OAuth credential 写入本地 secret store。
+4. 运行 capability check。
+5. capability check 成功后再运行完整同步。
+
+写入本地 secret store：
+
+```bash
+mkdir -p ~/.config/xbookmarks
+# 把 access token 写入 ~/.config/xbookmarks/access-token.txt
+# 把 refresh token 写入 ~/.config/xbookmarks/refresh-token.txt
+PYTHONPATH=src python3 -m xbookmarks.cli x-oauth store \
+  --client-id '...' \
+  --access-token-file ~/.config/xbookmarks/access-token.txt \
+  --refresh-token-file ~/.config/xbookmarks/refresh-token.txt
+```
+
+默认 secret 文件是 `data/secrets/x-oauth.json`，文件权限会设置为 `0600`。`data/`
+默认不进入 Git。token 不会写入 SQLite、`sync_state` 或运行日志。
+
+capability check：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli capability-check \
+  --connector x-api \
+  --x-user-id 123456789
+```
+
+完整同步：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli run \
+  --connector x-api \
+  --x-user-id 123456789 \
+  --archive-dir archive
+```
+
+分页相关参数：
+
+- `--x-page-size`：每页数量，范围 1 到 100，默认 100。
+- `--x-max-pages`：单次运行最多请求页数，默认 10。
+
+connector 会把 `x-api.cursor`、`x-api.pages_fetched`、`x-api.result_count` 和
+`x-api.has_more` 写入 `sync_state`。capability check 会写入
+`x-api.capability.status`、`x-api.capability.endpoint` 和
+`x-api.capability.result_count`。
+
+兼容调试方式：如果没有使用 secret store，也可以临时通过 `X_BEARER_TOKEN` 或
+`--x-token-file` 提供 access token。但 OAuth credential 和 refresh token 应优先放在
+secret store 中；不要把真实 token 写入项目文件或命令行历史。
+
 ## JSON Input
 
 MVP 支持常见字段名：

@@ -16,8 +16,14 @@ from .config import (
     merge_category_rules,
     save_category_config,
 )
+from .connectors import (
+    CONNECTOR_NAMES,
+    ConnectorCapabilityError,
+    ConnectorOptions,
+    SyncBatch,
+    build_connector,
+)
 from .exporter import export_html
-from .importer import load_bookmarks
 from .models import ClassificationResult
 from .providers import (
     PROVIDER_NAMES,
@@ -25,6 +31,7 @@ from .providers import (
     build_ollama_healthcheck_provider,
     build_provider,
 )
+from .secrets import DEFAULT_SECRET_PATH, SecretStore
 from .storage import BookmarkStore
 
 
@@ -61,7 +68,28 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     import_parser = subparsers.add_parser("import")
-    import_parser.add_argument("input", type=Path)
+    import_parser.add_argument("input", type=Path, nargs="?")
+    import_parser.add_argument(
+        "--connector", choices=CONNECTOR_NAMES, default="json-file"
+    )
+    _add_connector_args(import_parser)
+
+    capability_parser = subparsers.add_parser("capability-check")
+    capability_parser.add_argument("input", type=Path, nargs="?")
+    capability_parser.add_argument("--connector", choices=CONNECTOR_NAMES, default="x-api")
+    _add_connector_args(capability_parser)
+
+    x_oauth_parser = subparsers.add_parser("x-oauth")
+    x_oauth_subparsers = x_oauth_parser.add_subparsers(
+        dest="x_oauth_command", required=True
+    )
+    x_oauth_store_parser = x_oauth_subparsers.add_parser("store")
+    x_oauth_store_parser.add_argument("--secret-path", type=Path, default=DEFAULT_SECRET_PATH)
+    x_oauth_store_parser.add_argument("--client-id")
+    x_oauth_store_parser.add_argument("--access-token")
+    x_oauth_store_parser.add_argument("--access-token-file", type=Path)
+    x_oauth_store_parser.add_argument("--refresh-token")
+    x_oauth_store_parser.add_argument("--refresh-token-file", type=Path)
 
     classify_parser = subparsers.add_parser("classify")
     classify_parser.add_argument("--all", action="store_true", help="Reclassify all rows")
@@ -99,7 +127,11 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE)
 
     run_parser = subparsers.add_parser("run")
-    run_parser.add_argument("--input", type=Path, required=True)
+    run_parser.add_argument("--input", type=Path)
+    run_parser.add_argument(
+        "--connector", choices=CONNECTOR_NAMES, default="json-file"
+    )
+    _add_connector_args(run_parser)
     run_parser.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE)
     run_parser.add_argument("--reclassify", action="store_true")
     run_parser.add_argument(
@@ -147,14 +179,62 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "import":
-        bookmarks = load_bookmarks(args.input)
-        result = store.upsert_bookmarks(bookmarks)
+        batch = _sync_bookmarks(
+            store,
+            connector_name=args.connector,
+            input_path=args.input,
+            x_user_id=args.x_user_id,
+            x_bearer_token_env=args.x_bearer_token_env,
+            x_token_file=args.x_token_file,
+            x_secret_path=args.x_secret_path,
+            x_api_base_url=args.x_api_base_url,
+            x_page_size=args.x_page_size,
+            x_max_pages=args.x_max_pages,
+        )
+        result = store.upsert_bookmarks(batch.bookmarks)
         print(
             f"Imported {result.imported} bookmark(s): "
             f"inserted={result.inserted} updated={result.updated} "
             f"unchanged={result.unchanged} duplicates={result.duplicates}"
         )
         return 0
+
+    if args.command == "capability-check":
+        batch = _capability_check(
+            store,
+            connector_name=args.connector,
+            input_path=args.input,
+            x_user_id=args.x_user_id,
+            x_bearer_token_env=args.x_bearer_token_env,
+            x_token_file=args.x_token_file,
+            x_secret_path=args.x_secret_path,
+            x_api_base_url=args.x_api_base_url,
+            x_page_size=args.x_page_size,
+            x_max_pages=args.x_max_pages,
+        )
+        print(
+            f"Capability check succeeded: connector={args.connector} "
+            f"status={batch.metadata.get('status', 'ok')}"
+        )
+        return 0
+
+    if args.command == "x-oauth":
+        if args.x_oauth_command == "store":
+            access_token = _secret_arg(args.access_token, args.access_token_file)
+            refresh_token = _secret_arg(args.refresh_token, args.refresh_token_file)
+            if not (args.client_id or access_token or refresh_token):
+                parser.error(
+                    "x-oauth store requires at least one of --client-id, "
+                    "--access-token-file, --access-token, --refresh-token-file, "
+                    "or --refresh-token"
+                )
+            SecretStore(args.secret_path).save_oauth(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                client_id=args.client_id,
+            )
+            print(f"Stored X OAuth secrets: {args.secret_path}")
+            return 0
 
     if args.command == "classify":
         count = _classify(
@@ -254,8 +334,19 @@ def main(argv: list[str] | None = None) -> int:
         classified = 0
         exported = 0
         try:
-            bookmarks = load_bookmarks(args.input)
-            import_summary = store.upsert_bookmarks(bookmarks)
+            batch = _sync_bookmarks(
+                store,
+                connector_name=args.connector,
+                input_path=args.input,
+                x_user_id=args.x_user_id,
+                x_bearer_token_env=args.x_bearer_token_env,
+                x_token_file=args.x_token_file,
+                x_secret_path=args.x_secret_path,
+                x_api_base_url=args.x_api_base_url,
+                x_page_size=args.x_page_size,
+                x_max_pages=args.x_max_pages,
+            )
+            import_summary = store.upsert_bookmarks(batch.bookmarks)
             imported = import_summary.imported
             classified = _classify(
                 store,
@@ -400,6 +491,16 @@ def _add_ollama_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_connector_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--x-user-id")
+    parser.add_argument("--x-bearer-token-env", default="X_BEARER_TOKEN")
+    parser.add_argument("--x-token-file", type=Path)
+    parser.add_argument("--x-secret-path", type=Path, default=DEFAULT_SECRET_PATH)
+    parser.add_argument("--x-api-base-url", default="https://api.x.com")
+    parser.add_argument("--x-page-size", type=int, default=100)
+    parser.add_argument("--x-max-pages", type=int, default=10)
+
+
 def _env(name: str, default: str) -> str:
     value = os.environ.get(name)
     return value.strip() if value and value.strip() else default
@@ -520,6 +621,99 @@ def _parse_csv(value: str | None) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _secret_arg(value: str | None, file_path: Path | None) -> str | None:
+    if value and file_path:
+        raise ValueError("Pass a secret value or a secret file, not both.")
+    if file_path is not None:
+        text = file_path.read_text(encoding="utf-8").strip()
+        return text or None
+    if value is None:
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _sync_bookmarks(
+    store: BookmarkStore,
+    connector_name: str,
+    input_path: Path | None,
+    x_user_id: str | None = None,
+    x_bearer_token_env: str = "X_BEARER_TOKEN",
+    x_token_file: Path | None = None,
+    x_secret_path: Path = DEFAULT_SECRET_PATH,
+    x_api_base_url: str = "https://api.x.com",
+    x_page_size: int = 100,
+    x_max_pages: int = 10,
+) -> SyncBatch:
+    if connector_name == "x-api":
+        state = store.sync_state()
+        if state.get("x-api.capability.status") != "ok":
+            raise ConnectorCapabilityError(
+                "Run capability-check with --connector x-api before x-api sync."
+            )
+    connector = build_connector(
+        ConnectorOptions(
+            name=connector_name,
+            input_path=input_path,
+            x_user_id=x_user_id,
+            x_bearer_token_env=x_bearer_token_env,
+            x_token_file=x_token_file,
+            x_secret_path=x_secret_path,
+            x_api_base_url=x_api_base_url,
+            x_page_size=x_page_size,
+            x_max_pages=x_max_pages,
+        )
+    )
+    state = store.sync_state()
+    cursor = state.get(f"{connector.name}.cursor")
+    batch = connector.sync(cursor=cursor)
+    store.set_sync_state("last_connector", connector.name)
+    store.set_sync_state(f"{connector.name}.cursor", batch.next_cursor or "")
+    for key, value in sorted(batch.metadata.items()):
+        store.set_sync_state(f"{connector.name}.{key}", value)
+    return batch
+
+
+def _capability_check(
+    store: BookmarkStore,
+    connector_name: str,
+    input_path: Path | None,
+    x_user_id: str | None = None,
+    x_bearer_token_env: str = "X_BEARER_TOKEN",
+    x_token_file: Path | None = None,
+    x_secret_path: Path = DEFAULT_SECRET_PATH,
+    x_api_base_url: str = "https://api.x.com",
+    x_page_size: int = 100,
+    x_max_pages: int = 10,
+) -> SyncBatch:
+    connector = build_connector(
+        ConnectorOptions(
+            name=connector_name,
+            input_path=input_path,
+            x_user_id=x_user_id,
+            x_bearer_token_env=x_bearer_token_env,
+            x_token_file=x_token_file,
+            x_secret_path=x_secret_path,
+            x_api_base_url=x_api_base_url,
+            x_page_size=x_page_size,
+            x_max_pages=x_max_pages,
+        )
+    )
+    if not hasattr(connector, "capability_check"):
+        batch = connector.sync(cursor=None)
+        metadata = {
+            "status": "ok",
+            "result_count": str(len(batch.bookmarks)),
+        }
+        batch = SyncBatch(bookmarks=[], metadata=metadata)
+    else:
+        batch = connector.capability_check()
+    store.set_sync_state("last_connector", connector.name)
+    for key, value in sorted(batch.metadata.items()):
+        store.set_sync_state(f"{connector.name}.capability.{key}", value)
+    return batch
 
 
 def _load_category_config_or_empty(path: Path) -> dict[str, CategoryDefinition]:

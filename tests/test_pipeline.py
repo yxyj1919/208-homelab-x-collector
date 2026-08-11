@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import unittest
 from contextlib import redirect_stdout
@@ -9,6 +10,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from xbookmarks.cli import main
+from xbookmarks.connectors import (
+    ConnectorAuthError,
+    ConnectorCapabilityError,
+    ConnectorOptions,
+    ConnectorRateLimitError,
+    JsonFileConnector,
+    XApiConnector,
+    build_connector,
+    read_bearer_token,
+)
+from xbookmarks.secrets import SecretStore
 from xbookmarks.storage import BookmarkStore
 
 
@@ -257,6 +269,26 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("duplicates=1", first_output.getvalue())
         self.assertIn("unchanged=1", second_output.getvalue())
 
+    def test_import_records_json_file_connector_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            sample = base / "bookmarks.json"
+
+            sample.write_text(
+                json.dumps([{"id": "9001", "text": "Python programming"}]),
+                encoding="utf-8",
+            )
+
+            exit_code = main(["--db", str(db), "import", str(sample)])
+
+            state = BookmarkStore(db).sync_state()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(state["last_connector"], "json-file")
+        self.assertEqual(state["json-file.source_path"], str(sample))
+        self.assertRegex(state["json-file.cursor"], r"^\d+:\d+$")
+
     def test_changed_auto_classified_bookmark_is_marked_for_reclassification(self) -> None:
         with TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
@@ -449,6 +481,321 @@ class StorageMigrationTest(unittest.TestCase):
         self.assertIn("latest_run=id=1 status=succeeded command=run", status_output.getvalue())
         self.assertIn("1\tsucceeded\trun", log_output.getvalue())
         self.assertIn("imported=3", log_output.getvalue())
+
+
+class ConnectorTest(unittest.TestCase):
+    def test_build_json_file_connector(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            sample = Path(temp_dir) / "bookmarks.json"
+            sample.write_text(
+                json.dumps([{"id": "9001", "text": "Python programming"}]),
+                encoding="utf-8",
+            )
+
+            connector = build_connector(
+                ConnectorOptions(name="json-file", input_path=sample)
+            )
+            batch = connector.sync()
+
+        self.assertIsInstance(connector, JsonFileConnector)
+        self.assertEqual(len(batch.bookmarks), 1)
+        self.assertEqual(batch.bookmarks[0].tweet_id, "9001")
+        self.assertEqual(batch.metadata["source_path"], str(sample))
+
+    def test_read_bearer_token_from_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            token_file = Path(temp_dir) / "token.txt"
+            token_file.write_text("  test-token\n", encoding="utf-8")
+
+            token = read_bearer_token(env_name="MISSING_X_TOKEN", token_file=token_file)
+
+        self.assertEqual(token, "test-token")
+
+    def test_build_x_api_connector_requires_user_id(self) -> None:
+        with self.assertRaisesRegex(ValueError, "--x-user-id"):
+            build_connector(
+                ConnectorOptions(
+                    name="x-api",
+                    x_bearer_token_env="MISSING_X_TOKEN",
+                )
+            )
+
+    def test_build_x_api_connector_uses_token_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            token_file = Path(temp_dir) / "token.txt"
+            token_file.write_text("test-token", encoding="utf-8")
+
+            connector = build_connector(
+                ConnectorOptions(
+                    name="x-api",
+                    x_user_id="12345",
+                    x_token_file=token_file,
+                )
+            )
+
+        self.assertIsInstance(connector, XApiConnector)
+
+    def test_x_api_connector_reuses_client_and_paginates(self) -> None:
+        client = FakeXApiClient(
+            [
+                {
+                    "data": [
+                        {
+                            "id": "1001",
+                            "text": "VMware note",
+                            "author_id": "42",
+                            "created_at": "2026-08-11T01:00:00Z",
+                        }
+                    ],
+                    "includes": {
+                        "users": [
+                            {"id": "42", "username": "xdev", "name": "X Dev"}
+                        ]
+                    },
+                    "meta": {"next_token": "NEXT", "result_count": 1},
+                },
+                {
+                    "data": [
+                        {
+                            "id": "1002",
+                            "text": "Kubernetes note",
+                            "author_id": "43",
+                        }
+                    ],
+                    "meta": {"result_count": 1},
+                },
+            ]
+        )
+        connector = XApiConnector(
+            user_id="12345",
+            credential_manager=FakeCredentialManager("ignored"),
+            page_size=2,
+            max_pages=5,
+            client=client,
+        )
+
+        batch = connector.sync()
+
+        self.assertEqual([bookmark.tweet_id for bookmark in batch.bookmarks], ["1001", "1002"])
+        self.assertEqual(batch.bookmarks[0].author, "xdev")
+        self.assertIsNone(batch.next_cursor)
+        self.assertEqual(batch.metadata["pages_fetched"], "2")
+        self.assertEqual(
+            client.calls,
+            [
+                {
+                    "user_id": "12345",
+                    "bearer_token": "ignored",
+                    "max_results": 2,
+                    "pagination_token": None,
+                },
+                {
+                    "user_id": "12345",
+                    "bearer_token": "ignored",
+                    "max_results": 2,
+                    "pagination_token": "NEXT",
+                },
+            ],
+        )
+
+    def test_x_api_connector_keeps_cursor_when_page_limit_stops_early(self) -> None:
+        client = FakeXApiClient(
+            [
+                {
+                    "data": [{"id": "1001", "text": "VMware note"}],
+                    "meta": {"next_token": "NEXT", "result_count": 1},
+                }
+            ]
+        )
+        connector = XApiConnector(
+            user_id="12345",
+            credential_manager=FakeCredentialManager("ignored"),
+            page_size=10,
+            max_pages=1,
+            client=client,
+        )
+
+        batch = connector.sync(cursor="START")
+
+        self.assertEqual(batch.next_cursor, "NEXT")
+        self.assertEqual(batch.metadata["has_more"], "true")
+        self.assertEqual(client.calls[0]["pagination_token"], "START")
+
+    def test_x_api_connector_identifies_auth_errors(self) -> None:
+        connector = XApiConnector(
+            user_id="12345",
+            credential_manager=FakeCredentialManager("ignored"),
+            client=FakeXApiClient(
+                [
+                    {
+                        "errors": [
+                            {
+                                "status": 401,
+                                "title": "Unauthorized",
+                                "detail": "Invalid token",
+                            }
+                        ]
+                    }
+                ]
+            ),
+        )
+
+        with self.assertRaises(ConnectorAuthError):
+            connector.sync()
+
+    def test_x_api_connector_identifies_rate_limit_errors(self) -> None:
+        connector = XApiConnector(
+            user_id="12345",
+            credential_manager=FakeCredentialManager("ignored"),
+            client=FakeXApiClient(
+                [
+                    {
+                        "errors": [
+                            {
+                                "status": 429,
+                                "title": "Too Many Requests",
+                            }
+                        ]
+                    }
+                ]
+            ),
+        )
+
+        with self.assertRaises(ConnectorRateLimitError):
+            connector.sync()
+
+    def test_x_api_connector_refreshes_token_after_auth_error(self) -> None:
+        client = FakeXApiClient(
+            [
+                ConnectorAuthError("expired token"),
+                {"data": [{"id": "1001", "text": "VMware note"}], "meta": {}},
+            ]
+        )
+        credential_manager = FakeCredentialManager("old-token", refreshed="new-token")
+        connector = XApiConnector(
+            user_id="12345",
+            credential_manager=credential_manager,
+            client=client,
+        )
+
+        batch = connector.sync()
+
+        self.assertEqual(batch.bookmarks[0].tweet_id, "1001")
+        self.assertEqual(credential_manager.refresh_count, 1)
+        self.assertEqual(client.calls[0]["bearer_token"], "old-token")
+        self.assertEqual(client.calls[1]["bearer_token"], "new-token")
+
+    def test_secret_store_writes_oauth_file_with_private_permissions(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            secret_path = Path(temp_dir) / "x-oauth.json"
+
+            SecretStore(secret_path).save_oauth(
+                access_token="access",
+                refresh_token="refresh",
+                client_id="client",
+            )
+            mode = os.stat(secret_path).st_mode & 0o777
+            secrets = SecretStore(secret_path).load_oauth()
+
+        self.assertEqual(mode, 0o600)
+        self.assertEqual(secrets.access_token, "access")
+        self.assertEqual(secrets.refresh_token, "refresh")
+        self.assertEqual(secrets.client_id, "client")
+
+    def test_x_oauth_store_command_reads_token_files(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            secret_path = base / "x-oauth.json"
+            access_file = base / "access.txt"
+            refresh_file = base / "refresh.txt"
+            access_file.write_text("access\n", encoding="utf-8")
+            refresh_file.write_text("refresh\n", encoding="utf-8")
+
+            exit_code = main(
+                [
+                    "--db",
+                    str(db),
+                    "x-oauth",
+                    "store",
+                    "--secret-path",
+                    str(secret_path),
+                    "--client-id",
+                    "client",
+                    "--access-token-file",
+                    str(access_file),
+                    "--refresh-token-file",
+                    str(refresh_file),
+                ]
+            )
+            secrets = SecretStore(secret_path).load_oauth()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(secrets.access_token, "access")
+        self.assertEqual(secrets.refresh_token, "refresh")
+        self.assertEqual(secrets.client_id, "client")
+
+    def test_x_api_sync_requires_capability_check(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "bookmarks.sqlite"
+            secret_path = Path(temp_dir) / "x-oauth.json"
+            SecretStore(secret_path).save_oauth(access_token="access")
+
+            with self.assertRaises(ConnectorCapabilityError):
+                main(
+                    [
+                        "--db",
+                        str(db),
+                        "import",
+                        "--connector",
+                        "x-api",
+                        "--x-user-id",
+                        "12345",
+                        "--x-secret-path",
+                        str(secret_path),
+                    ]
+                )
+
+
+class FakeXApiClient:
+    def __init__(self, responses: list[dict]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def get_bookmarks(
+        self,
+        bearer_token: str,
+        user_id: str,
+        max_results: int,
+        pagination_token: str | None = None,
+    ) -> dict:
+        self.calls.append(
+            {
+                "user_id": user_id,
+                "bearer_token": bearer_token,
+                "max_results": max_results,
+                "pagination_token": pagination_token,
+            }
+        )
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class FakeCredentialManager:
+    def __init__(self, token: str, refreshed: str | None = None) -> None:
+        self.token = token
+        self.refreshed = refreshed or token
+        self.refresh_count = 0
+
+    def access_token(self) -> str:
+        return self.token
+
+    def refresh_access_token(self, client: object) -> str:
+        del client
+        self.refresh_count += 1
+        return self.refreshed
 
 
 if __name__ == "__main__":

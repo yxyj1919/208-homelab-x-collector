@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "homelab-x-collector"
-version = "2.0-alpha2"
+version = "2.0-alpha4"
 description = "Local-first X/Twitter bookmark archiver with SQLite storage and HTML export."
 readme = "README.md"
 requires-python = ">=3.11"
