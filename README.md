@@ -29,7 +29,6 @@ v0.1.0 是 JSON 导入版 MVP，适合作为本地收藏归档工具的第一版
 - 直接登录 X/Twitter 账号同步收藏。
 - X API / OAuth 集成。
 - 定时任务安装脚本。
-- Web UI。
 - Obsidian / Markdown 导出。
 - 多用户或远端服务部署。
 
@@ -127,6 +126,27 @@ python3 -m xbookmarks.cli export-html
 PYTHONPATH=src python3 -m xbookmarks.cli search "VMware lifecycle"
 PYTHONPATH=src python3 -m xbookmarks.cli search Kubernetes --limit 10
 ```
+
+## Local Web UI
+
+第一版本地 Web UI 只消费已经存在的 storage/search/sync 状态能力，不负责
+AI provider 配置、OAuth 流程或定时任务安装。
+
+启动：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli web --host 127.0.0.1 --port 8765
+```
+
+打开 `http://127.0.0.1:8765/` 后可以：
+
+- 列表查看收藏。
+- 搜索。
+- 按分类过滤。
+- 按 `active`、`unread`、`read`、`important`、`archived` 过滤。
+- 修改分类、标签、备注。
+- 标记 read/unread、important、archive。
+- 查看最近同步状态。
 
 ## Sync Connector
 

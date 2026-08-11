@@ -10,7 +10,7 @@ from typing import Iterable
 from .models import Bookmark, ClassificationResult
 
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     confidence REAL,
     reason TEXT,
     notes TEXT,
+    read_state TEXT NOT NULL DEFAULT 'unread',
+    important INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
     export_path TEXT,
     first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -129,6 +132,10 @@ class BookmarkStore:
         if version < 5:
             self._migrate_to_v5(conn)
             self._record_migration(conn, 5)
+            version = 5
+        if version < 6:
+            self._migrate_to_v6(conn)
+            self._record_migration(conn, 6)
 
     def _migrate_to_v2(self, conn: sqlite3.Connection) -> None:
         columns = self._bookmark_columns(conn)
@@ -263,6 +270,42 @@ class BookmarkStore:
             """
         )
         self._rebuild_search_index(conn)
+
+    def _migrate_to_v6(self, conn: sqlite3.Connection) -> None:
+        columns = self._bookmark_columns(conn)
+        if "read_state" not in columns:
+            conn.execute(
+                "ALTER TABLE bookmarks "
+                "ADD COLUMN read_state TEXT NOT NULL DEFAULT 'unread'"
+            )
+        if "important" not in columns:
+            conn.execute(
+                "ALTER TABLE bookmarks "
+                "ADD COLUMN important INTEGER NOT NULL DEFAULT 0"
+            )
+        if "archived" not in columns:
+            conn.execute(
+                "ALTER TABLE bookmarks "
+                "ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"
+            )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_bookmarks_read_state
+            ON bookmarks(read_state)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_bookmarks_important
+            ON bookmarks(important)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_bookmarks_archived
+            ON bookmarks(archived)
+            """
+        )
 
     def _schema_version(self, conn: sqlite3.Connection) -> int:
         exists = conn.execute(
@@ -427,7 +470,7 @@ class BookmarkStore:
                 SELECT tweet_id, url, text, author, created_at, content_hash,
                        change_count, first_seen_at, last_seen_at, category,
                        category_source, tags_json, confidence, reason, notes,
-                       export_path
+                       read_state, important, archived, export_path
                 FROM bookmarks
                 {where}
                 ORDER BY COALESCE(created_at, imported_at) DESC, tweet_id DESC
@@ -456,6 +499,65 @@ class BookmarkStore:
                     result.reason,
                     tweet_id,
                 ),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"Bookmark not found: {tweet_id}")
+            self._sync_search_index(conn, tweet_id)
+
+    def update_bookmark(
+        self,
+        tweet_id: str,
+        *,
+        category: str | None = None,
+        tags: list[str] | None = None,
+        notes: str | None = None,
+        read_state: str | None = None,
+        important: bool | None = None,
+        archived: bool | None = None,
+    ) -> None:
+        self.init()
+        assignments = []
+        params: list[object] = []
+        if category is not None:
+            assignments.extend(
+                [
+                    "category = ?",
+                    "category_source = 'manual'",
+                    "confidence = 1.0",
+                    "reason = 'Manually adjusted by user.'",
+                ]
+            )
+            params.append(category.strip() or None)
+        if tags is not None:
+            assignments.append("tags_json = ?")
+            params.append(json.dumps(tags, ensure_ascii=False))
+        if notes is not None:
+            assignments.append("notes = ?")
+            params.append(notes)
+        if read_state is not None:
+            if read_state not in {"read", "unread"}:
+                raise ValueError("read_state must be read or unread")
+            assignments.append("read_state = ?")
+            params.append(read_state)
+        if important is not None:
+            assignments.append("important = ?")
+            params.append(1 if important else 0)
+        if archived is not None:
+            assignments.append("archived = ?")
+            params.append(1 if archived else 0)
+        if not assignments:
+            return
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(tweet_id)
+
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE bookmarks
+                SET {', '.join(assignments)}
+                WHERE tweet_id = ?
+                """,
+                params,
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"Bookmark not found: {tweet_id}")
@@ -508,6 +610,91 @@ class BookmarkStore:
                 LIMIT ?
                 """,
                 (fts_query, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_bookmark(self, tweet_id: str) -> dict | None:
+        self.init()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT b.tweet_id, b.url, b.text, b.author, b.created_at,
+                       b.category, b.category_source, b.tags_json, b.confidence,
+                       b.reason, b.notes, b.read_state, b.important, b.archived,
+                       b.export_path, b.updated_at
+                FROM bookmarks AS b
+                WHERE b.tweet_id = ?
+                """,
+                (tweet_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_bookmarks(
+        self,
+        *,
+        query: str | None = None,
+        category: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        self.init()
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        if offset < 0:
+            raise ValueError("offset must be at least 0")
+
+        clauses = []
+        params: list[object] = []
+        if category:
+            if category == "Unclassified":
+                clauses.append("b.category IS NULL")
+            else:
+                clauses.append("b.category = ?")
+                params.append(category)
+        if status:
+            if status == "active":
+                clauses.append("b.archived = 0")
+            elif status == "archived":
+                clauses.append("b.archived = 1")
+            elif status == "important":
+                clauses.append("b.important = 1")
+            elif status in {"read", "unread"}:
+                clauses.append("b.read_state = ?")
+                params.append(status)
+            else:
+                raise ValueError(f"Unsupported status filter: {status}")
+
+        fts_query = _fts_query(query or "")
+        if fts_query:
+            clauses.append("bookmarks_fts MATCH ?")
+            params.append(fts_query)
+            from_sql = """
+                bookmarks_fts
+                JOIN bookmarks AS b ON b.tweet_id = bookmarks_fts.tweet_id
+            """
+            rank_sql = "bm25(bookmarks_fts) AS rank,"
+            order_sql = "rank, COALESCE(b.created_at, b.imported_at) DESC, b.tweet_id DESC"
+        else:
+            from_sql = "bookmarks AS b"
+            rank_sql = ""
+            order_sql = "COALESCE(b.created_at, b.imported_at) DESC, b.tweet_id DESC"
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.extend([limit, offset])
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT b.tweet_id, b.url, b.text, b.author, b.created_at,
+                       b.category, b.category_source, b.tags_json, b.confidence,
+                       b.reason, b.notes, b.read_state, b.important, b.archived,
+                       b.export_path, {rank_sql} b.updated_at
+                FROM {from_sql}
+                {where}
+                ORDER BY {order_sql}
+                LIMIT ? OFFSET ?
+                """,
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -612,6 +799,28 @@ class BookmarkStore:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def status_counts(self) -> dict[str, int]:
+        self.init()
+        with self.connect() as conn:
+            read = conn.execute(
+                "SELECT COUNT(*) FROM bookmarks WHERE read_state = 'read'"
+            ).fetchone()[0]
+            unread = conn.execute(
+                "SELECT COUNT(*) FROM bookmarks WHERE read_state = 'unread'"
+            ).fetchone()[0]
+            important = conn.execute(
+                "SELECT COUNT(*) FROM bookmarks WHERE important = 1"
+            ).fetchone()[0]
+            archived = conn.execute(
+                "SELECT COUNT(*) FROM bookmarks WHERE archived = 1"
+            ).fetchone()[0]
+        return {
+            "read": int(read),
+            "unread": int(unread),
+            "important": int(important),
+            "archived": int(archived),
+        }
 
     def _set_sync_state(
         self, conn: sqlite3.Connection, name: str, value: str

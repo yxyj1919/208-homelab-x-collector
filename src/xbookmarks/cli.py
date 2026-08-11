@@ -34,6 +34,7 @@ from .providers import (
 )
 from .secrets import DEFAULT_SECRET_PATH, SecretStore
 from .storage import BookmarkStore
+from .web import run_web_server
 
 
 DEFAULT_DB = Path("data/bookmarks.sqlite")
@@ -170,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
 
     run_log_parser = subparsers.add_parser("run-log")
     run_log_parser.add_argument("--limit", type=int, default=10)
+
+    web_parser = subparsers.add_parser("web")
+    web_parser.add_argument("--host", default="127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=8765)
 
     args = parser.parse_args(argv)
     store = BookmarkStore(args.db)
@@ -451,6 +456,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"exported={row['exported_count']}\t"
                 f"message={row['message'] or ''}"
             )
+        return 0
+
+    if args.command == "web":
+        if args.port < 1 or args.port > 65535:
+            parser.error("--port must be between 1 and 65535")
+        run_web_server(args.db, host=args.host, port=args.port)
         return 0
 
     if args.command == "stats":

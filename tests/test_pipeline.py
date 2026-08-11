@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import unittest
 from contextlib import redirect_stdout
+from http.server import ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.request import Request, urlopen
 
 from xbookmarks.cli import main
 from xbookmarks.connectors import (
@@ -23,6 +26,7 @@ from xbookmarks.connectors import (
 from xbookmarks.models import Bookmark, ClassificationResult
 from xbookmarks.secrets import SecretStore
 from xbookmarks.storage import BookmarkStore
+from xbookmarks.web import XBookmarksHandler
 
 
 class PipelineTest(unittest.TestCase):
@@ -430,6 +434,92 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual([row["tweet_id"] for row in by_tag], ["9001"])
         self.assertEqual([row["tweet_id"] for row in by_note], ["9001"])
 
+    def test_bookmark_metadata_updates_support_ui_filters(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/example/status/9001",
+                        text="VKS release note",
+                    )
+                ]
+            )
+            store.update_bookmark(
+                "9001",
+                category="Kubernetes",
+                tags=["vks", "manual"],
+                notes="follow up",
+                read_state="read",
+                important=True,
+                archived=True,
+            )
+
+            by_category = store.list_bookmarks(category="Kubernetes")
+            by_read = store.list_bookmarks(status="read")
+            by_important = store.list_bookmarks(status="important")
+            by_archived = store.list_bookmarks(status="archived")
+            by_query = store.list_bookmarks(query="follow")
+
+        self.assertEqual([row["tweet_id"] for row in by_category], ["9001"])
+        self.assertEqual([row["tweet_id"] for row in by_read], ["9001"])
+        self.assertEqual([row["tweet_id"] for row in by_important], ["9001"])
+        self.assertEqual([row["tweet_id"] for row in by_archived], ["9001"])
+        self.assertEqual([row["tweet_id"] for row in by_query], ["9001"])
+
+    def test_web_api_lists_and_updates_bookmarks(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/example/status/9001",
+                        text="VMware lifecycle",
+                        author="vcf-admin",
+                    )
+                ]
+            )
+
+            class Handler(XBookmarksHandler):
+                bookmark_store = store
+
+            try:
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            except PermissionError as exc:
+                raise unittest.SkipTest("local port binding is not permitted") from exc
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            try:
+                list_body = _read_json_url(f"{base_url}/api/bookmarks?query=VMware")
+                patch_body = _read_json_url(
+                    f"{base_url}/api/bookmarks/9001",
+                    method="PATCH",
+                    payload={
+                        "category": "VCF",
+                        "tags": ["vmware"],
+                        "notes": "read later",
+                        "read_state": "read",
+                        "important": True,
+                        "archived": False,
+                    },
+                )
+                filtered_body = _read_json_url(
+                    f"{base_url}/api/bookmarks?category=VCF&status=important"
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+        self.assertEqual(list_body["items"][0]["tweet_id"], "9001")
+        self.assertEqual(patch_body["item"]["category"], "VCF")
+        self.assertEqual(patch_body["item"]["read_state"], "read")
+        self.assertTrue(patch_body["item"]["important"])
+        self.assertEqual(filtered_body["items"][0]["tweet_id"], "9001")
+
 
 class StorageMigrationTest(unittest.TestCase):
     def test_init_migrates_v1_database_to_current_schema(self) -> None:
@@ -494,7 +584,10 @@ class StorageMigrationTest(unittest.TestCase):
 
         self.assertIn("category_source", columns)
         self.assertIn("notes", columns)
-        self.assertEqual(versions, [1, 2, 3, 4, 5])
+        self.assertIn("read_state", columns)
+        self.assertIn("important", columns)
+        self.assertIn("archived", columns)
+        self.assertEqual(versions, [1, 2, 3, 4, 5, 6])
         self.assertIn("idx_bookmarks_category", indexes)
         self.assertIn("idx_bookmarks_created_at", indexes)
         self.assertIn("bookmarks_fts", tables)
@@ -507,7 +600,7 @@ class StorageMigrationTest(unittest.TestCase):
 
             version = store.schema_version()
 
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 6)
 
     def test_run_logs_failed_run(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -874,6 +967,19 @@ class FakeCredentialManager:
         del client
         self.refresh_count += 1
         return self.refreshed
+
+
+def _read_json_url(
+    url: str, *, method: str = "GET", payload: dict | None = None
+) -> dict:
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(url, data=data, headers=headers, method=method)
+    with urlopen(request, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 if __name__ == "__main__":
