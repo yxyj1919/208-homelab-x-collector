@@ -114,6 +114,7 @@ def bookmark_updates(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def bookmark_payload(row: dict[str, Any]) -> dict[str, Any]:
+    raw = _raw_json(row)
     return {
         "tweet_id": row["tweet_id"],
         "url": row["url"],
@@ -131,6 +132,10 @@ def bookmark_payload(row: dict[str, Any]) -> dict[str, Any]:
         "archived": bool(row.get("archived")),
         "export_path": row.get("export_path"),
         "updated_at": row.get("updated_at"),
+        "author_profile": _author_profile(raw),
+        "media": _media_payload(raw),
+        "card": _card_payload(raw),
+        "quoted_tweet": _quoted_tweet_payload(raw),
     }
 
 
@@ -170,6 +175,96 @@ def _json_list(value: str | None) -> list[str]:
     if isinstance(parsed, list):
         return [str(item) for item in parsed]
     return [str(parsed)]
+
+
+def _raw_json(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("raw_json")
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _author_profile(raw: dict[str, Any]) -> dict[str, Any] | None:
+    author = raw.get("author")
+    if not isinstance(author, dict):
+        return None
+    return {
+        "user_id": _text(author.get("user_id") or author.get("id")),
+        "screen_name": _text(author.get("screen_name") or author.get("username")),
+        "name": _text(author.get("name")),
+        "profile_image_url": _text(author.get("profile_image_url")),
+        "verified": bool(author.get("verified")),
+        "followers_count": int(author.get("followers_count") or 0),
+    }
+
+
+def _media_payload(raw: dict[str, Any]) -> list[dict[str, str | None]]:
+    media = raw.get("media")
+    if not isinstance(media, list):
+        return []
+    payload = []
+    for item in media:
+        if not isinstance(item, dict):
+            continue
+        url = _text(item.get("url") or item.get("media_url_https"))
+        if not url:
+            continue
+        payload.append(
+            {
+                "type": _text(item.get("type")) or "media",
+                "url": url,
+                "alt_text": _text(item.get("alt_text")),
+            }
+        )
+    return payload
+
+
+def _card_payload(raw: dict[str, Any]) -> dict[str, str | None] | None:
+    card = raw.get("card")
+    if not isinstance(card, dict):
+        return None
+    url = _text(card.get("url"))
+    title = _text(card.get("title"))
+    description = _text(card.get("description"))
+    if not any((url, title, description)):
+        return None
+    return {
+        "type": _text(card.get("type")),
+        "url": url,
+        "title": title,
+        "description": description,
+    }
+
+
+def _quoted_tweet_payload(raw: dict[str, Any]) -> dict[str, Any] | None:
+    quoted = raw.get("quoted_tweet")
+    if not isinstance(quoted, dict):
+        return None
+    tweet_id = _text(quoted.get("tweet_id") or quoted.get("id"))
+    text = _text(quoted.get("full_text") or quoted.get("text"))
+    if not any((tweet_id, text)):
+        return None
+    author = quoted.get("author") if isinstance(quoted.get("author"), dict) else {}
+    return {
+        "tweet_id": tweet_id,
+        "text": text,
+        "author": {
+            "screen_name": _text(author.get("screen_name") or author.get("username")),
+            "name": _text(author.get("name")),
+        },
+        "url": f"https://x.com/i/status/{tweet_id}" if tweet_id else None,
+    }
+
+
+def _text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _blank_to_none(value: str | None) -> str | None:

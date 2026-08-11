@@ -505,7 +505,7 @@ class BookmarkStore:
         with self.connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT tweet_id, url, text, author, created_at, content_hash,
+                SELECT tweet_id, url, text, author, created_at, raw_json, content_hash,
                        change_count, first_seen_at, last_seen_at, category,
                        category_source, tags_json, confidence, reason, notes,
                        read_state, important, archived, export_path
@@ -659,7 +659,7 @@ class BookmarkStore:
                 SELECT b.tweet_id, b.url, b.text, b.author, b.created_at,
                        b.category, b.category_source, b.tags_json, b.confidence,
                        b.reason, b.notes, b.read_state, b.important, b.archived,
-                       b.export_path, b.updated_at
+                       b.export_path, b.raw_json, b.updated_at
                 FROM bookmarks AS b
                 WHERE b.tweet_id = ?
                 """,
@@ -726,7 +726,7 @@ class BookmarkStore:
                 SELECT b.tweet_id, b.url, b.text, b.author, b.created_at,
                        b.category, b.category_source, b.tags_json, b.confidence,
                        b.reason, b.notes, b.read_state, b.important, b.archived,
-                       b.export_path, {rank_sql} b.updated_at
+                       b.export_path, b.raw_json, {rank_sql} b.updated_at
                 FROM {from_sql}
                 {where}
                 ORDER BY {order_sql}

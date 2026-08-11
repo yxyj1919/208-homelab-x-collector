@@ -180,8 +180,16 @@ INDEX_HTML = r"""<!doctype html>
     .text { white-space: pre-wrap; margin: 8px 0; line-height: 1.45; }
     .note { color: #344054; background: #f2f4f7; border-left: 3px solid var(--accent); margin-top: 8px; padding: 7px 9px; font-size: 13px; line-height: 1.4; }
     .tag { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; margin: 4px 4px 0 0; background: #f9fafb; }
+    .badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+    .badge { border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: #fff; font-size: 12px; padding: 1px 6px; }
     aside { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px; align-self: start; position: sticky; top: 100px; }
     aside h2 { margin: 0 0 12px; font-size: 17px; letter-spacing: 0; }
+    .rich { display: grid; gap: 10px; margin-bottom: 12px; }
+    .author-box, .link-card, .quote-box { border: 1px solid var(--line); border-radius: 8px; background: #f9fafb; padding: 10px; }
+    .author-box strong, .link-card strong, .quote-box strong { display: block; margin-bottom: 4px; }
+    .media-grid { display: grid; gap: 8px; }
+    .media-grid img { width: 100%; max-height: 280px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    .link-card p, .quote-box p { margin: 5px 0 0; color: #344054; font-size: 13px; line-height: 1.4; }
     label { display: block; color: var(--muted); font-size: 13px; margin: 12px 0 5px; }
     .checks { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
     .checks label { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: var(--text); }
@@ -221,6 +229,7 @@ INDEX_HTML = r"""<!doctype html>
     <aside>
       <h2 id="editor-title">No item selected</h2>
       <div id="editor-body" hidden>
+        <div id="rich" class="rich"></div>
         <label for="edit-category">Category</label>
         <input id="edit-category" autocomplete="off">
         <label for="edit-tags">Tags</label>
@@ -294,9 +303,10 @@ INDEX_HTML = r"""<!doctype html>
       }
       list.innerHTML = state.items.map(item => `
         <article class="item" data-id="${escapeHtml(item.tweet_id)}" aria-selected="${state.selected && state.selected.tweet_id === item.tweet_id}">
-          <div class="meta">${escapeHtml(item.category)} · ${escapeHtml(item.author || "Unknown")} · ${escapeHtml(item.created_at || "Unknown date")} · ${escapeHtml(item.read_state)}${item.important ? " · important" : ""}${item.archived ? " · archived" : ""}</div>
+          <div class="meta">${escapeHtml(item.category)} · ${escapeHtml(authorLabel(item))} · ${escapeHtml(item.created_at || "Unknown date")} · ${escapeHtml(item.read_state)}${item.important ? " · important" : ""}${item.archived ? " · archived" : ""}</div>
           <div class="text">${escapeHtml(trimText(item.text, 260))}</div>
           ${item.notes ? `<div class="note">Note: ${escapeHtml(trimText(item.notes, 180))}</div>` : ""}
+          ${badgesHtml(item)}
           <div class="tags">${item.tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
         </article>
       `).join("");
@@ -319,12 +329,75 @@ INDEX_HTML = r"""<!doctype html>
       $("editor-title").textContent = item ? item.tweet_id : "No item selected";
       $("editor-body").hidden = !item;
       if (!item) return;
+      $("rich").innerHTML = richHtml(item);
       $("edit-category").value = item.category === "Unclassified" ? "" : item.category;
       $("edit-tags").value = item.tags.join(", ");
       $("edit-notes").value = item.notes || "";
       $("edit-read").checked = item.read_state === "read";
       $("edit-important").checked = item.important;
       $("edit-archived").checked = item.archived;
+    }
+
+    function authorLabel(item) {
+      const author = item.author_profile || {};
+      if (author.screen_name && author.name) return `${author.name} (@${author.screen_name})`;
+      if (author.screen_name) return `@${author.screen_name}`;
+      if (author.name) return author.name;
+      return item.author || author.user_id || "Unknown";
+    }
+
+    function badgesHtml(item) {
+      const badges = [];
+      if (item.media && item.media.length) badges.push(`${item.media.length} media`);
+      if (item.card) badges.push("card");
+      if (item.quoted_tweet) badges.push("quote");
+      if (!badges.length) return "";
+      return `<div class="badges">${badges.map(value => `<span class="badge">${escapeHtml(value)}</span>`).join("")}</div>`;
+    }
+
+    function richHtml(item) {
+      return [authorHtml(item), mediaHtml(item), cardHtml(item), quoteHtml(item)].filter(Boolean).join("");
+    }
+
+    function authorHtml(item) {
+      const author = item.author_profile;
+      if (!author) return "";
+      const parts = [];
+      if (author.user_id) parts.push(`id ${author.user_id}`);
+      if (author.followers_count) parts.push(`${author.followers_count} followers`);
+      if (author.verified) parts.push("verified");
+      const avatar = author.profile_image_url ? `<img src="${escapeHtml(author.profile_image_url)}" alt="" loading="lazy" style="width:32px;height:32px;border-radius:50%;float:right;">` : "";
+      return `<section class="author-box">${avatar}<strong>${escapeHtml(authorLabel(item))}</strong><div class="meta">${escapeHtml(parts.join(" · "))}</div></section>`;
+    }
+
+    function mediaHtml(item) {
+      if (!item.media || !item.media.length) return "";
+      const nodes = item.media.map(media => {
+        if (media.type === "photo") {
+          return `<img src="${escapeHtml(media.url)}" alt="${escapeHtml(media.alt_text || "media")}" loading="lazy">`;
+        }
+        return `<a href="${escapeHtml(media.url)}" target="_blank" rel="noopener">${escapeHtml(media.type || "media")}</a>`;
+      });
+      return `<section class="media-grid">${nodes.join("")}</section>`;
+    }
+
+    function cardHtml(item) {
+      const card = item.card;
+      if (!card) return "";
+      const title = escapeHtml(card.title || "Linked card");
+      const titleHtml = card.url ? `<a href="${escapeHtml(card.url)}" target="_blank" rel="noopener">${title}</a>` : title;
+      const desc = card.description ? `<p>${escapeHtml(trimText(card.description, 220))}</p>` : "";
+      return `<section class="link-card"><strong>${titleHtml}</strong>${desc}</section>`;
+    }
+
+    function quoteHtml(item) {
+      const quote = item.quoted_tweet;
+      if (!quote) return "";
+      const author = quote.author || {};
+      const name = author.screen_name ? `@${author.screen_name}` : (author.name || "Quoted tweet");
+      const title = quote.url ? `<a href="${escapeHtml(quote.url)}" target="_blank" rel="noopener">${escapeHtml(name)}</a>` : escapeHtml(name);
+      const text = quote.text ? `<p>${escapeHtml(trimText(quote.text, 260))}</p>` : "";
+      return `<section class="quote-box"><strong>${title}</strong>${text}</section>`;
     }
 
     async function saveSelected() {

@@ -24,6 +24,7 @@ from xbookmarks.connectors import (
     build_connector,
     read_bearer_token,
 )
+from xbookmarks.exporter import export_html
 from xbookmarks.models import Bookmark, ClassificationResult
 from xbookmarks.secrets import SecretStore
 from xbookmarks.services import BookmarkService
@@ -735,6 +736,105 @@ class PipelineTest(unittest.TestCase):
             service.update_bookmark("9001", {"unknown": True})
         with self.assertRaisesRegex(ValueError, "limit must be between"):
             service.list_bookmarks(limit=0)
+
+    def test_bookmark_service_exposes_xarchive_rich_fields(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            service = BookmarkService(store)
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/i/status/9001",
+                        text="VMware note",
+                        author="42",
+                        raw={
+                            "author": {
+                                "user_id": "42",
+                                "screen_name": "vmw_notes",
+                                "name": "VMware Notes",
+                                "verified": True,
+                            },
+                            "media": [
+                                {
+                                    "type": "photo",
+                                    "url": "https://example.com/image.jpg",
+                                    "alt_text": "diagram",
+                                }
+                            ],
+                            "card": {
+                                "url": "https://example.com/post",
+                                "title": "Linked post",
+                                "description": "Useful reference",
+                            },
+                            "quoted_tweet": {
+                                "tweet_id": "9000",
+                                "full_text": "Quoted note",
+                                "author": {"screen_name": "quoted"},
+                            },
+                        },
+                    )
+                ]
+            )
+
+            item = service.list_bookmarks()["items"][0]
+
+        self.assertEqual(item["author_profile"]["screen_name"], "vmw_notes")
+        self.assertTrue(item["author_profile"]["verified"])
+        self.assertEqual(item["media"][0]["url"], "https://example.com/image.jpg")
+        self.assertEqual(item["card"]["title"], "Linked post")
+        self.assertEqual(item["quoted_tweet"]["tweet_id"], "9000")
+
+    def test_export_html_renders_xarchive_rich_fields(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            store = BookmarkStore(base / "bookmarks.sqlite")
+            archive = base / "archive"
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/i/status/9001",
+                        text="VMware note",
+                        author="42",
+                        created_at="2026-08-10T10:00:00Z",
+                        raw={
+                            "author": {
+                                "user_id": "42",
+                                "screen_name": "vmw_notes",
+                                "name": "VMware Notes",
+                            },
+                            "media": [
+                                {
+                                    "type": "photo",
+                                    "url": "https://example.com/image.jpg",
+                                    "alt_text": "diagram",
+                                }
+                            ],
+                            "card": {
+                                "url": "https://example.com/post",
+                                "title": "Linked post",
+                                "description": "Useful reference",
+                            },
+                            "quoted_tweet": {
+                                "tweet_id": "9000",
+                                "full_text": "Quoted note",
+                                "author": {"screen_name": "quoted"},
+                            },
+                        },
+                    )
+                ]
+            )
+
+            export_html(store, archive)
+            html_text = (archive / "General" / "2026-08-10_9001.html").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertIn("VMware Notes (@vmw_notes)", html_text)
+        self.assertIn("https://example.com/image.jpg", html_text)
+        self.assertIn("Linked post", html_text)
+        self.assertIn("Quoted note", html_text)
 
     def test_web_api_lists_and_updates_bookmarks(self) -> None:
         with TemporaryDirectory() as temp_dir:
