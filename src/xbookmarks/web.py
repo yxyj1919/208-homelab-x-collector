@@ -253,6 +253,7 @@ INDEX_HTML = r"""<!doctype html>
     .item[aria-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
     .meta, .tags, .sync { color: var(--muted); font-size: 13px; line-height: 1.4; }
     .text { white-space: pre-wrap; margin: 8px 0; line-height: 1.45; }
+    .note { color: #344054; background: #f2f4f7; border-left: 3px solid var(--accent); margin-top: 8px; padding: 7px 9px; font-size: 13px; line-height: 1.4; }
     .tag { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; margin: 4px 4px 0 0; background: #f9fafb; }
     aside { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px; align-self: start; position: sticky; top: 100px; }
     aside h2 { margin: 0 0 12px; font-size: 17px; letter-spacing: 0; }
@@ -369,6 +370,7 @@ INDEX_HTML = r"""<!doctype html>
         <article class="item" data-id="${escapeHtml(item.tweet_id)}" aria-selected="${state.selected && state.selected.tweet_id === item.tweet_id}">
           <div class="meta">${escapeHtml(item.category)} · ${escapeHtml(item.author || "Unknown")} · ${escapeHtml(item.created_at || "Unknown date")} · ${escapeHtml(item.read_state)}${item.important ? " · important" : ""}${item.archived ? " · archived" : ""}</div>
           <div class="text">${escapeHtml(trimText(item.text, 260))}</div>
+          ${item.notes ? `<div class="note">Note: ${escapeHtml(trimText(item.notes, 180))}</div>` : ""}
           <div class="tags">${item.tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
         </article>
       `).join("");
@@ -401,6 +403,7 @@ INDEX_HTML = r"""<!doctype html>
 
     async function saveSelected() {
       if (!state.selected) return;
+      sync.textContent = "Saving...";
       const payload = {
         category: $("edit-category").value.trim(),
         tags: $("edit-tags").value.split(",").map(v => v.trim()).filter(Boolean),
@@ -409,13 +412,18 @@ INDEX_HTML = r"""<!doctype html>
         important: $("edit-important").checked,
         archived: $("edit-archived").checked
       };
-      const body = await api(`/api/bookmarks/${encodeURIComponent(state.selected.tweet_id)}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      state.selected = body.item;
-      await Promise.all([loadCategories(), loadItems()]);
+      try {
+        const body = await api(`/api/bookmarks/${encodeURIComponent(state.selected.tweet_id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        state.selected = body.item;
+        await Promise.all([loadCategories(), loadItems()]);
+        sync.textContent = `Saved ${state.selected.tweet_id}`;
+      } catch (error) {
+        sync.textContent = `Save failed: ${error.message}`;
+      }
     }
 
     function escapeHtml(value) {
