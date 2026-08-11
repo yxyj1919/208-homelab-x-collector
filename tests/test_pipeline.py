@@ -737,6 +737,113 @@ class PipelineTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "limit must be between"):
             service.list_bookmarks(limit=0)
 
+    def test_bookmark_service_imports_extension_payload(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            service = BookmarkService(store)
+
+            result = service.import_extension_bookmarks(
+                {
+                    "source": "chrome-extension",
+                    "source_url": "https://x.com/i/bookmarks",
+                    "export_html": False,
+                    "items": [
+                        {
+                            "tweet_id": "9101",
+                            "url": "https://x.com/example/status/9101",
+                            "text": "VMware Cloud Foundation bookmark",
+                            "author": "example",
+                            "created_at": "2026-08-11T10:00:00Z",
+                        },
+                        {
+                            "tweet_id": "9101",
+                            "url": "https://x.com/example/status/9101",
+                            "text": "VMware Cloud Foundation bookmark",
+                            "author": "example",
+                        },
+                    ],
+                }
+            )
+            items = service.list_bookmarks(query="Foundation")["items"]
+            state = store.sync_state()
+
+        self.assertEqual(result["inserted"], 1)
+        self.assertEqual(result["duplicates"], 1)
+        self.assertEqual(items[0]["tweet_id"], "9101")
+        self.assertEqual(items[0]["author"], "example")
+        self.assertEqual(state["last_connector"], "chrome-extension")
+        self.assertEqual(state["chrome-extension.source_url"], "https://x.com/i/bookmarks")
+
+    def test_bookmark_service_imports_graphql_author_object(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            service = BookmarkService(store)
+
+            service.import_extension_bookmarks(
+                {
+                    "source": "chrome-extension-graphql",
+                    "source_url": "https://x.com/i/bookmarks",
+                    "export_html": False,
+                    "items": [
+                        {
+                            "tweet_id": "9201",
+                            "url": "https://x.com/i/status/9201",
+                            "full_text": "Kubernetes bookmark",
+                            "author": {
+                                "user_id": "42",
+                                "screen_name": "k8s_notes",
+                                "name": "K8s Notes",
+                            },
+                        },
+                    ],
+                }
+            )
+            item = service.list_bookmarks(query="Kubernetes")["items"][0]
+
+        self.assertEqual(item["author"], "k8s_notes")
+        self.assertEqual(item["author_profile"]["screen_name"], "k8s_notes")
+
+    def test_bookmark_service_allows_final_graphql_export_summary(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            service = BookmarkService(store)
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9301",
+                        url="https://x.com/i/status/9301",
+                        text="VMware bookmark",
+                    )
+                ]
+            )
+
+            result = service.import_extension_bookmarks(
+                {
+                    "source": "chrome-extension-graphql",
+                    "source_url": "https://x.com/i/bookmarks",
+                    "export_html": True,
+                    "summary": {
+                        "source": 101,
+                        "unique": 101,
+                        "imported": 101,
+                        "inserted": 1,
+                        "updated": 99,
+                        "unchanged": 1,
+                        "duplicates": 0,
+                        "classified": 77,
+                    },
+                    "items": [],
+                }
+            )
+            status = service.sync_status()["summary"]
+
+        self.assertEqual(result["total_seen"], 101)
+        self.assertEqual(result["classified"], 78)
+        self.assertEqual(status["source_count"], 101)
+        self.assertEqual(status["updated"], 99)
+        self.assertEqual(status["classified"], 78)
+        self.assertEqual(status["exported"], 1)
+
     def test_bookmark_service_exposes_xarchive_rich_fields(self) -> None:
         with TemporaryDirectory() as temp_dir:
             store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
@@ -887,6 +994,58 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(patch_body["item"]["read_state"], "read")
         self.assertTrue(patch_body["item"]["important"])
         self.assertEqual(filtered_body["items"][0]["tweet_id"], "9001")
+
+    def test_web_api_imports_extension_bookmarks(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+
+            class Handler(XBookmarksHandler):
+                bookmark_service = BookmarkService(store)
+
+            try:
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            except PermissionError as exc:
+                raise unittest.SkipTest("local port binding is not permitted") from exc
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            try:
+                import_body = _read_json_url(
+                    f"{base_url}/api/extension/bookmarks",
+                    method="POST",
+                    payload={
+                        "source": "chrome-extension",
+                        "source_url": "https://x.com/i/bookmarks",
+                        "export_html": False,
+                        "items": [
+                            {
+                                "tweet_id": "9101",
+                                "url": "https://x.com/example/status/9101",
+                                "text": "VMware Cloud Foundation bookmark",
+                                "author": "example",
+                                "created_at": "2026-08-11T10:00:00Z",
+                            },
+                            {
+                                "tweet_id": "9101",
+                                "url": "https://x.com/example/status/9101",
+                                "text": "VMware Cloud Foundation bookmark",
+                            },
+                        ],
+                    },
+                )
+                list_body = _read_json_url(f"{base_url}/api/bookmarks?query=Foundation")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+            state = store.sync_state()
+
+        self.assertEqual(import_body["inserted"], 1)
+        self.assertEqual(import_body["duplicates"], 1)
+        self.assertEqual(list_body["items"][0]["tweet_id"], "9101")
+        self.assertEqual(state["last_connector"], "chrome-extension")
+        self.assertEqual(state["chrome-extension.source_url"], "https://x.com/i/bookmarks")
 
 
 class StorageMigrationTest(unittest.TestCase):

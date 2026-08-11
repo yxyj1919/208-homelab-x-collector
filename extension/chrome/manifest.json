@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "X Bookmarks Local Helper",
+  "version": "0.1.0",
+  "description": "Minimal helper for the local xbookmarks archive workflow.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "X Bookmarks"
+  },
+  "options_page": "options.html",
+  "permissions": [
+    "activeTab",
+    "cookies",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess",
+    "storage",
+    "unlimitedStorage",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://x.com/*",
+    "https://twitter.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

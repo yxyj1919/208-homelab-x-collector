@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .models import ClassificationResult
+from .classifier import RuleBasedClassifier
+from .config import DEFAULT_CATEGORIES, load_category_rules
+from .exporter import export_html
+from .models import Bookmark, ClassificationResult
 from .storage import BookmarkStore
 
 
@@ -67,6 +70,87 @@ class BookmarkService:
         row = self.store.get_bookmark(tweet_id)
         return {"item": bookmark_payload(row) if row else None}
 
+    def import_extension_bookmarks(self, payload: dict[str, Any]) -> dict[str, Any]:
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise ValueError("items must be a list")
+        if len(items) > 5000:
+            raise ValueError("items must contain at most 5000 bookmarks")
+
+        bookmarks: list[Bookmark] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            bookmark = extension_bookmark(item)
+            if bookmark is not None:
+                bookmarks.append(bookmark)
+
+        should_classify = bool(payload.get("classify", True))
+        should_export = bool(payload.get("export_html", True))
+        archive_dir = _archive_dir(payload.get("archive_dir"))
+        run_id = self.store.begin_run(
+            "extension-import",
+            archive_dir=archive_dir if should_export else None,
+            connector="chrome-extension",
+            provider="rules" if should_classify else None,
+            model="rules" if should_classify else None,
+        )
+        classified = 0
+        exported = 0
+        try:
+            result = self.store.upsert_bookmarks(bookmarks)
+            if should_classify:
+                classified = self._classify_unclassified_with_rules()
+            if should_export:
+                exported = export_html(self.store, archive_dir)
+            classified_total = _summary_int(payload, "classified", 0) + classified
+            self.store.set_sync_state("last_connector", "chrome-extension")
+            self.store.set_sync_state(
+                "chrome-extension.source_url",
+                _text(payload.get("source_url")) or "",
+            )
+            self.store.set_sync_state(
+                "chrome-extension.result_count",
+                str(result.unique_seen),
+            )
+            self.store.finish_run(
+                run_id,
+                "succeeded",
+                imported_count=_summary_int(payload, "imported", result.imported),
+                classified_count=classified_total,
+                exported_count=exported,
+                inserted_count=_summary_int(payload, "inserted", result.inserted),
+                updated_count=_summary_int(payload, "updated", result.updated),
+                unchanged_count=_summary_int(payload, "unchanged", result.unchanged),
+                duplicate_count=_summary_int(payload, "duplicates", result.duplicates),
+                source_count=_summary_int(payload, "source", result.total_seen),
+            )
+        except Exception as exc:
+            self.store.finish_run(run_id, "failed", message=str(exc))
+            raise
+
+        return {
+            "run_id": run_id,
+            "total_seen": _summary_int(payload, "source", result.total_seen),
+            "unique_seen": _summary_int(payload, "unique", result.unique_seen),
+            "imported": _summary_int(payload, "imported", result.imported),
+            "inserted": _summary_int(payload, "inserted", result.inserted),
+            "updated": _summary_int(payload, "updated", result.updated),
+            "unchanged": _summary_int(payload, "unchanged", result.unchanged),
+            "duplicates": _summary_int(payload, "duplicates", result.duplicates),
+            "classified": classified_total,
+            "exported": exported,
+            "archive_dir": str(archive_dir) if should_export else None,
+        }
+
+    def _classify_unclassified_with_rules(self) -> int:
+        classifier = RuleBasedClassifier(load_category_rules(DEFAULT_CATEGORIES))
+        rows = self.store.iter_bookmarks(only_unclassified=True, skip_manual=True)
+        for row in rows:
+            result = classifier.classify(f"{row.get('text') or ''} {row.get('author') or ''}")
+            self.store.save_classification(row["tweet_id"], result)
+        return len(rows)
+
     def set_bookmark_category(
         self,
         tweet_id: str,
@@ -111,6 +195,62 @@ def bookmark_updates(payload: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"{key} must be a boolean")
             updates[key] = payload[key]
     return updates
+
+
+def extension_bookmark(record: dict[str, Any]) -> Bookmark | None:
+    tweet_id = _text(record.get("tweet_id") or record.get("id"))
+    text = _text(record.get("text") or record.get("full_text"))
+    if not tweet_id or not text:
+        return None
+
+    url = _text(record.get("url")) or f"https://x.com/i/status/{tweet_id}"
+    author_value = record.get("author")
+    author = _extension_author_text(author_value)
+    created_at = _text(record.get("created_at"))
+    return Bookmark(
+        tweet_id=tweet_id,
+        url=url,
+        text=text,
+        author=author,
+        created_at=created_at,
+        raw={
+            **record,
+            "source": "chrome-extension",
+        },
+    )
+
+
+def _extension_author_text(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return _text(
+            value.get("screen_name")
+            or value.get("username")
+            or value.get("name")
+            or value.get("user_id")
+            or value.get("id")
+        )
+    return _text(value)
+
+
+def _archive_dir(value: Any) -> Path:
+    text = _text(value) or "archive"
+    path = Path(text)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("archive_dir must be a relative path inside the project")
+    return path
+
+
+def _summary_int(payload: dict[str, Any], name: str, default: int) -> int:
+    summary = payload.get("summary")
+    if not isinstance(summary, dict) or name not in summary:
+        return default
+    try:
+        value = int(summary[name])
+    except (TypeError, ValueError):
+        raise ValueError(f"summary.{name} must be an integer")
+    if value < 0:
+        raise ValueError(f"summary.{name} must not be negative")
+    return value
 
 
 def bookmark_payload(row: dict[str, Any]) -> dict[str, Any]:

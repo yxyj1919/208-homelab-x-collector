@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>X Bookmarks Options</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="options">
+  <main>
+    <header>
+      <h1>X Bookmarks Options</h1>
+    </header>
+
+    <section class="panel">
+      <label for="apiBaseUrl">Local UI URL</label>
+      <input id="apiBaseUrl" type="url" placeholder="http://127.0.0.1:8765">
+      <p class="hint">Keep this pointed at the local web UI started by xbookmarks.</p>
+      <div class="actions">
+        <button id="save" class="primary" type="button">Save</button>
+        <button id="reset" type="button">Reset</button>
+      </div>
+      <div id="message" class="status"></div>
+    </section>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

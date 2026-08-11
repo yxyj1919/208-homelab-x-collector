@@ -159,6 +159,80 @@ PYTHONPATH=src python3 -m xbookmarks.cli web --host 127.0.0.1 --port 8765
 - 标记 read/unread、important、archive。
 - 查看最近同步状态。
 
+## Chrome Extension Prototype
+
+项目内包含一个最小 Chrome extension 原型：`extension/chrome`。
+
+当前只用于辅助本地归档流程：
+
+- 可作为 unpacked extension 加载。
+- popup 检测当前 tab 是否是 X/Twitter bookmarks 页面或 tweet 页面。
+- 检查本地 Web UI `http://127.0.0.1:8765` 是否可访问。
+- 在 `x.com` / `twitter.com` 页面显示一个可拖动的 `XB` 浮动按钮，用于打开本地 UI。
+- 在已登录且已加载的 X/Twitter 页面中抓取可见 tweet card，并导入本地 SQLite。
+- 可在 bookmarks 页面自动滚动抓取已加载的收藏，并自动规则分类、导出 HTML 到 `archive/`。
+- 捕获当前 X.com 会话的 user id、CSRF cookie、GraphQL header 和 bookmarks queryId 状态，用于后续后台 GraphQL 导出。
+- 使用已捕获的 X.com 会话状态主动分页调用 bookmarks GraphQL，并将结果直接导入本地 SQLite。
+- 配置仅保存在 Chrome extension local storage。
+
+当前不做：
+
+- 不处理 X/Twitter 登录。
+- 不把 X.com cookie/header/token 写入项目文件、SQLite、运行日志或 HTML archive。
+- 不使用官方 X API / OAuth 路线。
+
+加载方式：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli web --host 127.0.0.1 --port 8765
+```
+
+然后打开 `chrome://extensions`，启用 Developer mode，选择 Load unpacked，并选择
+`extension/chrome` 目录。
+
+可见收藏抓取测试方式：
+
+1. 打开 `https://x.com/i/bookmarks`。
+2. 滚动页面，让要导入的收藏出现在当前页面 DOM 中。
+3. 打开 extension popup。
+4. 点击 `Capture visible`。
+5. 回到本地 Web UI 或刷新 `http://127.0.0.1:8765/` 查看导入结果。
+
+这是原型级 DOM 抓取，只抓取当前页面已加载的可见 tweet card；X/Twitter DOM 改版时可能需要调整 selector。
+
+自动抓取整页：
+
+1. 打开 `https://x.com/i/bookmarks`。
+2. 打开 extension popup。
+3. 点击 `Capture all`。
+
+extension 会自动滚动页面，收集加载出来的 tweet card，最多滚动 80 次，连续多轮没有新
+tweet 时停止。导入完成后，本地服务会对未分类记录执行规则分类，并重新导出 `archive/`
+HTML。
+
+后台 GraphQL 导出准备状态：
+
+1. 重新加载 extension。
+2. 打开或刷新 `https://x.com/i/bookmarks`。
+3. 打开 extension popup。
+4. 查看 `X Session Capture`：
+   - `User`：已从当前 X.com 会话捕获 user id。
+   - `Auth`：已从 X.com GraphQL 请求捕获认证相关 header。
+   - `Bookmarks queryId`：已捕获 bookmarks GraphQL operation queryId。
+
+这一步只做状态捕获和本地显示，不主动调用 X.com GraphQL 导出接口。
+
+后台 GraphQL 导出：
+
+1. 确认 `X Session Capture` 中三项都是 captured。
+2. 确认本地 UI 仍在运行：`http://127.0.0.1:8765/`。
+3. 点击 `GraphQL Export`。
+
+extension 会从 background service worker 调用 X.com bookmarks GraphQL，每页最多 100 条，
+分页过程中按页 POST 到本地 `POST /api/extension/bookmarks`。分页结束后，本地服务会对未
+分类记录执行规则分类，并重新导出 `archive/` HTML。这个流程不依赖 bookmarks 页面滚动
+显示，但依赖当前 Chrome 仍登录 X.com，且依赖 X.com 内部 GraphQL schema/queryId 未变化。
+
 ## Sync Connector
 
 导入和 `run` 流程现在通过 connector 获取收藏记录。当前实现的 connector 是

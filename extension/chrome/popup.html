@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>X Bookmarks</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>X Bookmarks</h1>
+      <span id="page-kind" class="badge">Checking page</span>
+    </header>
+
+    <section class="panel">
+      <div class="label">Local UI</div>
+      <div id="api-url" class="value">http://127.0.0.1:8765</div>
+      <div id="status" class="status">Checking local service...</div>
+      <div class="actions">
+        <button id="open-ui" class="primary" type="button">Open UI</button>
+        <button id="graphql-export" type="button" disabled>GraphQL Export</button>
+        <button id="capture" type="button" disabled>Capture visible</button>
+        <button id="capture-all" type="button" disabled>Capture all</button>
+        <button id="options" type="button">Options</button>
+      </div>
+      <div id="capture-status" class="status"></div>
+      <div id="graphql-status" class="status"></div>
+    </section>
+
+    <section class="panel">
+      <div class="label">Current Tab</div>
+      <div id="tab-title" class="value muted">No tab detected</div>
+      <div id="tab-url" class="url muted"></div>
+    </section>
+
+    <section class="panel">
+      <div class="label">X Session Capture</div>
+      <div class="status-row">
+        <span id="user-dot" class="dot"></span>
+        <span id="user-status">User: checking</span>
+      </div>
+      <div class="status-row">
+        <span id="auth-dot" class="dot"></span>
+        <span id="auth-status">Auth: checking</span>
+      </div>
+      <div class="status-row">
+        <span id="query-dot" class="dot"></span>
+        <span id="query-status">Bookmarks queryId: checking</span>
+      </div>
+      <div id="capture-hint" class="status"></div>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

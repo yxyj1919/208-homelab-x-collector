@@ -62,6 +62,13 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
             return
         self._send_error(HTTPStatus.NOT_FOUND, "Not found")
 
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/extension/bookmarks":
+            self._handle_extension_bookmarks()
+            return
+        self._send_error(HTTPStatus.NOT_FOUND, "Not found")
+
     def log_message(self, format: str, *args: object) -> None:
         return
 
@@ -99,6 +106,15 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         self._send_json(response)
+
+    def _handle_extension_bookmarks(self) -> None:
+        try:
+            payload = self._read_json()
+            response = self.bookmark_service.import_extension_bookmarks(payload)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        self._send_json(response, status=HTTPStatus.CREATED)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
