@@ -198,6 +198,8 @@ INDEX_HTML = r"""<!doctype html>
     .tag { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; margin: 4px 4px 0 0; background: #f9fafb; }
     .badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
     .badge { border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: #fff; font-size: 12px; padding: 1px 6px; }
+    .review-panel { border: 1px solid var(--line); border-radius: 8px; background: #f9fafb; padding: 10px; margin-bottom: 12px; font-size: 13px; line-height: 1.45; }
+    .review-panel strong { display: block; margin-bottom: 4px; }
     aside { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px; align-self: start; position: sticky; top: 100px; }
     aside h2 { margin: 0 0 12px; font-size: 17px; letter-spacing: 0; }
     .rich { display: grid; gap: 10px; margin-bottom: 12px; }
@@ -246,6 +248,7 @@ INDEX_HTML = r"""<!doctype html>
     <aside>
       <h2 id="editor-title">No item selected</h2>
       <div id="editor-body" hidden>
+        <div id="review-detail" class="review-panel"></div>
         <div id="rich" class="rich"></div>
         <label for="edit-category">Category</label>
         <input id="edit-category" autocomplete="off">
@@ -323,6 +326,7 @@ INDEX_HTML = r"""<!doctype html>
         <article class="item" data-id="${escapeHtml(item.tweet_id)}" aria-selected="${state.selected && state.selected.tweet_id === item.tweet_id}">
           <div class="meta">${escapeHtml(item.category)} · ${escapeHtml(authorLabel(item))} · ${escapeHtml(item.created_at || "Unknown date")} · ${escapeHtml(item.read_state)}${item.important ? " · important" : ""}${item.review_state === "pending" ? " · pending review" : ""}${item.archived ? " · archived" : ""}</div>
           <div class="text">${escapeHtml(trimText(item.text, 260))}</div>
+          ${item.review_state === "pending" ? `<div class="note">Review: ${escapeHtml(reviewReasonLabel(item.review_reason))}${item.confidence != null ? ` · confidence ${escapeHtml(formatConfidence(item.confidence))}` : ""}</div>` : ""}
           ${item.notes ? `<div class="note">Note: ${escapeHtml(trimText(item.notes, 180))}</div>` : ""}
           ${badgesHtml(item)}
           <div class="tags">${item.tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
@@ -347,6 +351,7 @@ INDEX_HTML = r"""<!doctype html>
       $("editor-title").textContent = item ? item.tweet_id : "No item selected";
       $("editor-body").hidden = !item;
       if (!item) return;
+      $("review-detail").innerHTML = reviewDetailHtml(item);
       $("rich").innerHTML = richHtml(item);
       $("edit-category").value = item.category === "Unclassified" ? "" : item.category;
       $("edit-tags").value = item.tags.join(", ");
@@ -372,6 +377,32 @@ INDEX_HTML = r"""<!doctype html>
       if (item.quoted_tweet) badges.push("quote");
       if (!badges.length) return "";
       return `<div class="badges">${badges.map(value => `<span class="badge">${escapeHtml(value)}</span>`).join("")}</div>`;
+    }
+
+    function reviewReasonLabel(value) {
+      const labels = {
+        "new-import": "new import",
+        "low-confidence": "low confidence",
+        "content-changed": "content changed",
+        "manual-pending": "manual pending"
+      };
+      return labels[value] || value || "pending";
+    }
+
+    function formatConfidence(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "unknown";
+      return number.toFixed(2);
+    }
+
+    function reviewDetailHtml(item) {
+      const rows = [
+        ["Review", item.review_state === "pending" ? `pending (${reviewReasonLabel(item.review_reason)})` : "accepted"],
+        ["Provider", item.provider || "unknown"],
+        ["Confidence", item.confidence == null ? "unknown" : formatConfidence(item.confidence)],
+        ["Reason", item.reason || ""]
+      ].filter(([, value]) => value);
+      return `<strong>Review</strong>${rows.map(([name, value]) => `<div><span class="meta">${escapeHtml(name)}:</span> ${escapeHtml(value)}</div>`).join("")}`;
     }
 
     function richHtml(item) {
@@ -446,6 +477,7 @@ INDEX_HTML = r"""<!doctype html>
 
     async function acceptSelected() {
       if (!state.selected) return;
+      const acceptedId = state.selected.tweet_id;
       sync.textContent = "Accepting...";
       try {
         const body = await api(`/api/bookmarks/${encodeURIComponent(state.selected.tweet_id)}`, {
@@ -455,7 +487,7 @@ INDEX_HTML = r"""<!doctype html>
         });
         state.selected = body.item;
         await Promise.all([loadCategories(), loadItems()]);
-        sync.textContent = `Accepted ${state.selected.tweet_id}`;
+        sync.textContent = `Accepted ${acceptedId}`;
       } catch (error) {
         sync.textContent = `Accept failed: ${error.message}`;
       }

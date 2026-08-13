@@ -29,7 +29,7 @@ from xbookmarks.models import Bookmark, ClassificationResult
 from xbookmarks.secrets import SecretStore
 from xbookmarks.services import BookmarkService
 from xbookmarks.storage import CURRENT_SCHEMA_VERSION, BookmarkStore
-from xbookmarks.web import XBookmarksHandler
+from xbookmarks.web import INDEX_HTML, XBookmarksHandler
 
 
 class PipelineTest(unittest.TestCase):
@@ -1151,6 +1151,14 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(filtered_body["items"][0]["tweet_id"], "9001")
         self.assertEqual(accept_body["item"]["review_state"], "accepted")
         self.assertEqual(pending_body["items"], [])
+
+    def test_web_ui_exposes_review_queue_details(self) -> None:
+        self.assertIn("Pending review", INDEX_HTML)
+        self.assertIn("review-detail", INDEX_HTML)
+        self.assertIn("reviewReasonLabel", INDEX_HTML)
+        self.assertIn("formatConfidence", INDEX_HTML)
+        self.assertIn("Provider", INDEX_HTML)
+        self.assertIn("acceptedId", INDEX_HTML)
 
     def test_web_api_imports_extension_bookmarks(self) -> None:
         with TemporaryDirectory() as temp_dir:
