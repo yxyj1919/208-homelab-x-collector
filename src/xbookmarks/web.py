@@ -232,6 +232,7 @@ INDEX_HTML = r"""<!doctype html>
         <option value="unread">Unread</option>
         <option value="read">Read</option>
         <option value="important">Important</option>
+        <option value="pending_review">Pending review</option>
         <option value="archived">Archived</option>
       </select>
       <button id="refresh" type="button">Refresh</button>
@@ -259,6 +260,7 @@ INDEX_HTML = r"""<!doctype html>
         </div>
         <div class="actions">
           <button id="save" class="primary" type="button">Save</button>
+          <button id="accept-review" type="button">Accept</button>
           <button id="open" type="button">Open</button>
         </div>
       </div>
@@ -319,7 +321,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       list.innerHTML = state.items.map(item => `
         <article class="item" data-id="${escapeHtml(item.tweet_id)}" aria-selected="${state.selected && state.selected.tweet_id === item.tweet_id}">
-          <div class="meta">${escapeHtml(item.category)} · ${escapeHtml(authorLabel(item))} · ${escapeHtml(item.created_at || "Unknown date")} · ${escapeHtml(item.read_state)}${item.important ? " · important" : ""}${item.archived ? " · archived" : ""}</div>
+          <div class="meta">${escapeHtml(item.category)} · ${escapeHtml(authorLabel(item))} · ${escapeHtml(item.created_at || "Unknown date")} · ${escapeHtml(item.read_state)}${item.important ? " · important" : ""}${item.review_state === "pending" ? " · pending review" : ""}${item.archived ? " · archived" : ""}</div>
           <div class="text">${escapeHtml(trimText(item.text, 260))}</div>
           ${item.notes ? `<div class="note">Note: ${escapeHtml(trimText(item.notes, 180))}</div>` : ""}
           ${badgesHtml(item)}
@@ -352,6 +354,7 @@ INDEX_HTML = r"""<!doctype html>
       $("edit-read").checked = item.read_state === "read";
       $("edit-important").checked = item.important;
       $("edit-archived").checked = item.archived;
+      $("accept-review").disabled = item.review_state !== "pending";
     }
 
     function authorLabel(item) {
@@ -441,6 +444,23 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
 
+    async function acceptSelected() {
+      if (!state.selected) return;
+      sync.textContent = "Accepting...";
+      try {
+        const body = await api(`/api/bookmarks/${encodeURIComponent(state.selected.tweet_id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ review_state: "accepted" })
+        });
+        state.selected = body.item;
+        await Promise.all([loadCategories(), loadItems()]);
+        sync.textContent = `Accepted ${state.selected.tweet_id}`;
+      } catch (error) {
+        sync.textContent = `Accept failed: ${error.message}`;
+      }
+    }
+
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
     }
@@ -455,6 +475,7 @@ INDEX_HTML = r"""<!doctype html>
     status.addEventListener("change", loadItems);
     $("refresh").addEventListener("click", () => Promise.all([loadCategories(), loadSyncStatus(), loadItems()]));
     $("save").addEventListener("click", saveSelected);
+    $("accept-review").addEventListener("click", acceptSelected);
     $("open").addEventListener("click", () => { if (state.selected) window.open(state.selected.url, "_blank", "noopener"); });
 
     Promise.all([loadCategories(), loadSyncStatus(), loadItems()]).catch(error => {

@@ -791,13 +791,52 @@ class PipelineTest(unittest.TestCase):
             by_read = store.list_bookmarks(status="read")
             by_important = store.list_bookmarks(status="important")
             by_archived = store.list_bookmarks(status="archived")
+            by_pending = store.list_bookmarks(status="pending_review")
             by_query = store.list_bookmarks(query="follow")
 
         self.assertEqual([row["tweet_id"] for row in by_category], ["9001"])
         self.assertEqual([row["tweet_id"] for row in by_read], ["9001"])
         self.assertEqual([row["tweet_id"] for row in by_important], ["9001"])
         self.assertEqual([row["tweet_id"] for row in by_archived], ["9001"])
+        self.assertEqual(by_pending, [])
         self.assertEqual([row["tweet_id"] for row in by_query], ["9001"])
+
+    def test_new_and_low_confidence_bookmarks_enter_review_queue(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/example/status/9001",
+                        text="Unmatched note",
+                    )
+                ]
+            )
+
+            new_pending = store.list_bookmarks(status="pending_review")
+            store.save_classification(
+                "9001",
+                ClassificationResult(
+                    category="General",
+                    tags=[],
+                    confidence=0.2,
+                    reason="No category keyword matched.",
+                ),
+                provider="rules",
+            )
+            low_confidence = store.get_bookmark("9001")
+            store.update_bookmark("9001", review_state="accepted")
+            accepted = store.get_bookmark("9001")
+            after_accept = store.list_bookmarks(status="pending_review")
+
+        self.assertEqual([row["tweet_id"] for row in new_pending], ["9001"])
+        self.assertEqual(low_confidence["review_state"], "pending")
+        self.assertEqual(low_confidence["review_reason"], "low-confidence")
+        self.assertEqual(accepted["review_state"], "accepted")
+        self.assertIsNone(accepted["review_reason"])
+        self.assertIsNotNone(accepted["reviewed_at"])
+        self.assertEqual(after_accept, [])
 
     def test_bookmark_service_normalizes_payloads_and_filters(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -825,10 +864,14 @@ class PipelineTest(unittest.TestCase):
                     "archived": False,
                 },
             )
+            accepted_body = service.update_bookmark(
+                "9001", {"review_state": "accepted"}
+            )
             list_body = service.list_bookmarks(category="VCF", status="important")
 
         self.assertEqual(patch_body["item"]["category"], "VCF")
         self.assertEqual(patch_body["item"]["tags"], ["vmware", "homelab"])
+        self.assertEqual(accepted_body["item"]["review_state"], "accepted")
         self.assertEqual(list_body["items"][0]["tweet_id"], "9001")
 
     def test_bookmark_service_rejects_invalid_api_inputs(self) -> None:
@@ -838,6 +881,8 @@ class PipelineTest(unittest.TestCase):
             service.update_bookmark("9001", {"unknown": True})
         with self.assertRaisesRegex(ValueError, "limit must be between"):
             service.list_bookmarks(limit=0)
+        with self.assertRaisesRegex(ValueError, "review_state"):
+            service.update_bookmark("9001", {"review_state": "done"})
 
     def test_bookmark_service_imports_extension_payload(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1086,6 +1131,14 @@ class PipelineTest(unittest.TestCase):
                 filtered_body = _read_json_url(
                     f"{base_url}/api/bookmarks?category=VCF&status=important"
                 )
+                accept_body = _read_json_url(
+                    f"{base_url}/api/bookmarks/9001",
+                    method="PATCH",
+                    payload={"review_state": "accepted"},
+                )
+                pending_body = _read_json_url(
+                    f"{base_url}/api/bookmarks?status=pending_review"
+                )
             finally:
                 server.shutdown()
                 server.server_close()
@@ -1096,6 +1149,8 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(patch_body["item"]["read_state"], "read")
         self.assertTrue(patch_body["item"]["important"])
         self.assertEqual(filtered_body["items"][0]["tweet_id"], "9001")
+        self.assertEqual(accept_body["item"]["review_state"], "accepted")
+        self.assertEqual(pending_body["items"], [])
 
     def test_web_api_imports_extension_bookmarks(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1207,6 +1262,9 @@ class StorageMigrationTest(unittest.TestCase):
                 category_source = conn.execute(
                     "SELECT category_source FROM bookmarks WHERE tweet_id = '1001'"
                 ).fetchone()[0]
+                review_state = conn.execute(
+                    "SELECT review_state FROM bookmarks WHERE tweet_id = '1001'"
+                ).fetchone()[0]
                 search_count = conn.execute(
                     "SELECT COUNT(*) FROM bookmarks_fts WHERE bookmarks_fts MATCH 'VMware'"
                 ).fetchone()[0]
@@ -1217,11 +1275,15 @@ class StorageMigrationTest(unittest.TestCase):
         self.assertIn("important", columns)
         self.assertIn("archived", columns)
         self.assertIn("classification_provider", columns)
+        self.assertIn("review_state", columns)
+        self.assertIn("review_reason", columns)
+        self.assertIn("reviewed_at", columns)
         self.assertEqual(versions, list(range(1, CURRENT_SCHEMA_VERSION + 1)))
         self.assertIn("idx_bookmarks_category", indexes)
         self.assertIn("idx_bookmarks_created_at", indexes)
         self.assertIn("bookmarks_fts", tables)
         self.assertEqual(category_source, "auto")
+        self.assertEqual(review_state, "accepted")
         self.assertEqual(search_count, 1)
 
     def test_new_database_initializes_at_current_schema_version(self) -> None:

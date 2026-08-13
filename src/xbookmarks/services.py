@@ -173,7 +173,15 @@ class BookmarkService:
 
 
 def bookmark_updates(payload: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"category", "tags", "notes", "read_state", "important", "archived"}
+    allowed = {
+        "category",
+        "tags",
+        "notes",
+        "read_state",
+        "important",
+        "archived",
+        "review_state",
+    }
     unknown = sorted(set(payload) - allowed)
     if unknown:
         raise ValueError(f"Unsupported field(s): {', '.join(unknown)}")
@@ -195,6 +203,11 @@ def bookmark_updates(payload: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(payload[key], bool):
                 raise ValueError(f"{key} must be a boolean")
             updates[key] = payload[key]
+    if "review_state" in payload:
+        value = payload["review_state"]
+        if value not in {"pending", "accepted"}:
+            raise ValueError("review_state must be pending or accepted")
+        updates["review_state"] = value
     return updates
 
 
@@ -272,6 +285,9 @@ def bookmark_payload(row: dict[str, Any]) -> dict[str, Any]:
         "read_state": row.get("read_state") or "unread",
         "important": bool(row.get("important")),
         "archived": bool(row.get("archived")),
+        "review_state": row.get("review_state") or "pending",
+        "review_reason": row.get("review_reason"),
+        "reviewed_at": row.get("reviewed_at"),
         "export_path": row.get("export_path"),
         "updated_at": row.get("updated_at"),
         "author_profile": _author_profile(raw),

@@ -10,7 +10,9 @@ from typing import Iterable
 from .models import Bookmark, ClassificationResult
 
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
+
+LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.6
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,9 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     read_state TEXT NOT NULL DEFAULT 'unread',
     important INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
+    review_state TEXT NOT NULL DEFAULT 'pending',
+    review_reason TEXT,
+    reviewed_at TEXT,
     export_path TEXT,
     first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -155,6 +160,10 @@ class BookmarkStore:
         if version < 8:
             self._migrate_to_v8(conn)
             self._record_migration(conn, 8)
+            version = 8
+        if version < 9:
+            self._migrate_to_v9(conn)
+            self._record_migration(conn, 9)
 
     def _migrate_to_v2(self, conn: sqlite3.Connection) -> None:
         columns = self._bookmark_columns(conn)
@@ -349,6 +358,24 @@ class BookmarkStore:
         if "classification_provider" not in columns:
             conn.execute("ALTER TABLE bookmarks ADD COLUMN classification_provider TEXT")
 
+    def _migrate_to_v9(self, conn: sqlite3.Connection) -> None:
+        columns = self._bookmark_columns(conn)
+        if "review_state" not in columns:
+            conn.execute(
+                "ALTER TABLE bookmarks "
+                "ADD COLUMN review_state TEXT NOT NULL DEFAULT 'accepted'"
+            )
+        if "review_reason" not in columns:
+            conn.execute("ALTER TABLE bookmarks ADD COLUMN review_reason TEXT")
+        if "reviewed_at" not in columns:
+            conn.execute("ALTER TABLE bookmarks ADD COLUMN reviewed_at TEXT")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_bookmarks_review_state
+            ON bookmarks(review_state)
+            """
+        )
+
     def _schema_version(self, conn: sqlite3.Connection) -> int:
         exists = conn.execute(
             """
@@ -417,9 +444,9 @@ class BookmarkStore:
                         """
                         INSERT INTO bookmarks (
                             tweet_id, url, text, author, created_at, raw_json,
-                            content_hash, updated_at
+                            content_hash, review_state, review_reason, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'new-import', CURRENT_TIMESTAMP)
                         """,
                         (
                             bookmark.tweet_id,
@@ -456,6 +483,10 @@ class BookmarkStore:
                         tags_json = '[]',
                         confidence = NULL,
                         reason = NULL,
+                        classification_provider = NULL,
+                        review_state = 'pending',
+                        review_reason = 'content-changed',
+                        reviewed_at = NULL,
                     """
                 conn.execute(
                     f"""
@@ -519,7 +550,8 @@ class BookmarkStore:
                        change_count, first_seen_at, last_seen_at, category,
                        category_source, tags_json, confidence, reason,
                        classification_provider, notes,
-                       read_state, important, archived, export_path
+                       read_state, important, archived, review_state,
+                       review_reason, reviewed_at, export_path
                 FROM bookmarks
                 {where}
                 ORDER BY COALESCE(created_at, imported_at) DESC, tweet_id DESC
@@ -537,14 +569,34 @@ class BookmarkStore:
         provider: str | None = None,
     ) -> None:
         with self.connect() as conn:
+            review_assignments = []
+            if source == "manual":
+                review_assignments = [
+                    "review_state = 'accepted'",
+                    "review_reason = NULL",
+                    "reviewed_at = CURRENT_TIMESTAMP",
+                ]
+            elif (
+                result.confidence is None
+                or result.confidence < LOW_CONFIDENCE_REVIEW_THRESHOLD
+            ):
+                review_assignments = [
+                    "review_state = 'pending'",
+                    "review_reason = 'low-confidence'",
+                    "reviewed_at = NULL",
+                ]
+            review_sql = (
+                ", " + ", ".join(review_assignments) if review_assignments else ""
+            )
             cursor = conn.execute(
                 """
                 UPDATE bookmarks
                 SET category = ?, category_source = ?, tags_json = ?,
                     confidence = ?, reason = ?, classification_provider = ?,
                     updated_at = CURRENT_TIMESTAMP
+                    {review_sql}
                 WHERE tweet_id = ?
-                """,
+                """.format(review_sql=review_sql),
                 (
                     result.category,
                     source,
@@ -569,6 +621,7 @@ class BookmarkStore:
         read_state: str | None = None,
         important: bool | None = None,
         archived: bool | None = None,
+        review_state: str | None = None,
     ) -> None:
         self.init()
         assignments = []
@@ -581,6 +634,9 @@ class BookmarkStore:
                     "confidence = 1.0",
                     "reason = 'Manually adjusted by user.'",
                     "classification_provider = 'manual'",
+                    "review_state = 'accepted'",
+                    "review_reason = NULL",
+                    "reviewed_at = CURRENT_TIMESTAMP",
                 ]
             )
             params.append(category.strip() or None)
@@ -601,6 +657,19 @@ class BookmarkStore:
         if archived is not None:
             assignments.append("archived = ?")
             params.append(1 if archived else 0)
+        if review_state is not None:
+            if review_state not in {"pending", "accepted"}:
+                raise ValueError("review_state must be pending or accepted")
+            assignments.append("review_state = ?")
+            params.append(review_state)
+            if review_state == "accepted":
+                assignments.extend(
+                    ["review_reason = NULL", "reviewed_at = CURRENT_TIMESTAMP"]
+                )
+            else:
+                assignments.extend(
+                    ["review_reason = 'manual-pending'", "reviewed_at = NULL"]
+                )
         if not assignments:
             return
         assignments.append("updated_at = CURRENT_TIMESTAMP")
@@ -678,8 +747,9 @@ class BookmarkStore:
                 SELECT b.tweet_id, b.url, b.text, b.author, b.created_at,
                        b.category, b.category_source, b.tags_json, b.confidence,
                        b.reason, b.classification_provider, b.notes,
-                       b.read_state, b.important, b.archived, b.export_path,
-                       b.raw_json, b.updated_at
+                       b.read_state, b.important, b.archived, b.review_state,
+                       b.review_reason, b.reviewed_at, b.export_path, b.raw_json,
+                       b.updated_at
                 FROM bookmarks AS b
                 WHERE b.tweet_id = ?
                 """,
@@ -720,6 +790,8 @@ class BookmarkStore:
             elif status in {"read", "unread"}:
                 clauses.append("b.read_state = ?")
                 params.append(status)
+            elif status == "pending_review":
+                clauses.append("b.review_state = 'pending'")
             else:
                 raise ValueError(f"Unsupported status filter: {status}")
 
@@ -746,8 +818,9 @@ class BookmarkStore:
                 SELECT b.tweet_id, b.url, b.text, b.author, b.created_at,
                        b.category, b.category_source, b.tags_json, b.confidence,
                        b.reason, b.classification_provider, b.notes,
-                       b.read_state, b.important, b.archived, b.export_path,
-                       b.raw_json, {rank_sql} b.updated_at
+                       b.read_state, b.important, b.archived, b.review_state,
+                       b.review_reason, b.reviewed_at, b.export_path, b.raw_json,
+                       {rank_sql} b.updated_at
                 FROM {from_sql}
                 {where}
                 ORDER BY {order_sql}
@@ -901,11 +974,15 @@ class BookmarkStore:
             archived = conn.execute(
                 "SELECT COUNT(*) FROM bookmarks WHERE archived = 1"
             ).fetchone()[0]
+            pending_review = conn.execute(
+                "SELECT COUNT(*) FROM bookmarks WHERE review_state = 'pending'"
+            ).fetchone()[0]
         return {
             "read": int(read),
             "unread": int(unread),
             "important": int(important),
             "archived": int(archived),
+            "pending_review": int(pending_review),
         }
 
     def _set_sync_state(

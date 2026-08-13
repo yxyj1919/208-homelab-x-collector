@@ -168,10 +168,14 @@ PYTHONPATH=src python3 -m xbookmarks.cli web --host 127.0.0.1 --port 8765
 - 列表查看收藏。
 - 搜索。
 - 按分类过滤。
-- 按 `active`、`unread`、`read`、`important`、`archived` 过滤。
+- 按 `active`、`unread`、`read`、`important`、`pending_review`、`archived` 过滤。
 - 修改分类、标签、备注。
 - 标记 read/unread、important、archive。
+- 对 pending review 单条收藏执行 Accept。
 - 查看最近同步状态。
+
+Review queue 当前是轻量状态层：新导入记录默认进入 `pending`，低置信度自动分类会保持
+`pending` 并记录原因；旧库迁移后的历史记录默认视为 `accepted`，避免升级后全部进入待审核。
 
 ## Chrome Extension Prototype
 
