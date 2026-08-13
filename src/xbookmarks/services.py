@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from .classifier import RuleBasedClassifier
-from .config import DEFAULT_CATEGORIES, load_category_rules
+from .config import DEFAULT_CATEGORIES, load_category_config, load_category_rules
 from .exporter import export_html
 from .models import Bookmark, ClassificationResult
+from .providers import PROVIDER_NAMES, ProviderOptions, build_provider
 from .storage import BookmarkStore
 
 
@@ -63,6 +64,87 @@ class BookmarkService:
             "state": self.store.sync_state(),
             "latest_runs": latest_runs,
             "summary": sync_summary(latest_runs[0] if latest_runs else None),
+        }
+
+    def classify_bookmarks(self, payload: dict[str, Any]) -> dict[str, Any]:
+        provider_name = _text(payload.get("provider")) or "ollama"
+        if provider_name not in PROVIDER_NAMES:
+            raise ValueError(f"provider must be one of: {', '.join(PROVIDER_NAMES)}")
+        category = _text(payload.get("category"))
+        limit = _int_value(payload.get("limit"), "limit", default=20, minimum=1, maximum=500)
+        include_manual = bool(payload.get("include_manual", False))
+        reclassify = bool(payload.get("reclassify", bool(category)))
+        should_export = bool(payload.get("export_html", True))
+        archive_dir = _archive_dir(payload.get("archive_dir"))
+        ollama_model = _text(payload.get("ollama_model")) or "qwen2.5:7b"
+        ollama_url = _text(payload.get("ollama_url")) or "http://127.0.0.1:11434"
+        ollama_timeout = _int_value(
+            payload.get("ollama_timeout"),
+            "ollama_timeout",
+            default=180,
+            minimum=1,
+            maximum=1800,
+        )
+
+        definitions = load_category_config(DEFAULT_CATEGORIES)
+        provider = build_provider(
+            ProviderOptions(
+                name=provider_name,
+                ollama_model=ollama_model,
+                ollama_url=ollama_url,
+                ollama_timeout=ollama_timeout,
+            ),
+            definitions,
+        )
+        run_id = self.store.begin_run(
+            "web-classify",
+            archive_dir=archive_dir if should_export else None,
+            provider=provider.name,
+            model=provider.model_label,
+        )
+        classified = 0
+        exported = 0
+        try:
+            rows = self.store.iter_bookmarks(
+                only_unclassified=not reclassify,
+                category=category,
+                limit=limit,
+                skip_manual=not include_manual,
+            )
+            for row in rows:
+                result = provider.classifier.classify(
+                    f"{row.get('text') or ''} {row.get('author') or ''}"
+                )
+                self.store.save_classification(
+                    row["tweet_id"],
+                    result,
+                    provider=provider.name,
+                )
+            classified = len(rows)
+            if should_export:
+                exported = export_html(self.store, archive_dir)
+            self.store.finish_run(
+                run_id,
+                "succeeded",
+                classified_count=classified,
+                exported_count=exported,
+                source_count=len(rows),
+            )
+        except Exception as exc:
+            self.store.finish_run(run_id, "failed", message=str(exc))
+            raise
+
+        return {
+            "run_id": run_id,
+            "provider": provider.name,
+            "model": provider.model_label,
+            "category": category,
+            "limit": limit,
+            "reclassify": reclassify,
+            "include_manual": include_manual,
+            "classified": classified,
+            "exported": exported,
+            "archive_dir": str(archive_dir) if should_export else None,
         }
 
     def update_bookmark(
@@ -304,6 +386,26 @@ def _summary_int(payload: dict[str, Any], name: str, default: int) -> int:
     if value < 0:
         raise ValueError(f"summary.{name} must not be negative")
     return value
+
+
+def _int_value(
+    value: Any,
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if value in (None, ""):
+        number = default
+    else:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be an integer") from None
+    if number < minimum or number > maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return number
 
 
 def bookmark_payload(row: dict[str, Any]) -> dict[str, Any]:

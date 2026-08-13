@@ -70,6 +70,9 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/bookmarks/bulk":
             self._handle_bulk_bookmarks()
             return
+        if parsed.path == "/api/classify":
+            self._handle_classify()
+            return
         if parsed.path == "/api/extension/bookmarks":
             self._handle_extension_bookmarks()
             return
@@ -120,6 +123,15 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             response = self.bookmark_service.bulk_update_bookmarks(payload)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        self._send_json(response)
+
+    def _handle_classify(self) -> None:
+        try:
+            payload = self._read_json()
+            response = self.bookmark_service.classify_bookmarks(payload)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
@@ -200,6 +212,7 @@ INDEX_HTML = r"""<!doctype html>
     header { padding: 18px 24px 12px; border-bottom: 1px solid var(--line); background: #fff; position: sticky; top: 0; z-index: 5; }
     h1 { margin: 0 0 12px; font-size: 22px; font-weight: 650; letter-spacing: 0; }
     .toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 180px 160px auto; gap: 10px; align-items: center; }
+    .ai-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
     input, select, textarea, button { font: inherit; }
     input, select, textarea { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px; background: #fff; color: var(--text); }
     button { border: 1px solid var(--line); border-radius: 6px; padding: 9px 12px; background: #fff; color: var(--text); cursor: pointer; }
@@ -218,6 +231,9 @@ INDEX_HTML = r"""<!doctype html>
     .tag { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; margin: 4px 4px 0 0; background: #f9fafb; }
     .badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
     .badge { border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: #fff; font-size: 12px; padding: 1px 6px; }
+    .item-media { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 150px)); gap: 8px; margin-top: 8px; }
+    .item-media img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    .item-media a { display: inline-flex; align-items: center; min-height: 36px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; color: var(--accent); background: #fff; font-size: 13px; }
     .review-panel { border: 1px solid var(--line); border-radius: 8px; background: #f9fafb; padding: 10px; margin-bottom: 12px; font-size: 13px; line-height: 1.45; }
     .review-panel strong { display: block; margin-bottom: 4px; }
     aside { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px; align-self: start; position: sticky; top: 100px; }
@@ -236,6 +252,11 @@ INDEX_HTML = r"""<!doctype html>
     .bulk-actions { display: grid; grid-template-columns: auto auto auto minmax(160px, 220px) auto; gap: 8px; align-items: center; margin-bottom: 10px; }
     .bulk-actions span { color: var(--muted); font-size: 13px; }
     .empty { color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; padding: 24px; text-align: center; }
+    dialog { border: 1px solid var(--line); border-radius: 8px; padding: 0; width: min(420px, calc(100vw - 32px)); color: var(--text); }
+    dialog::backdrop { background: rgba(15, 23, 42, 0.28); }
+    .modal { padding: 18px; background: var(--panel); }
+    .modal h2 { margin: 0 0 12px; font-size: 18px; letter-spacing: 0; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
     @media (max-width: 860px) {
       .toolbar { grid-template-columns: 1fr; }
       .bulk-actions { grid-template-columns: 1fr; }
@@ -261,6 +282,9 @@ INDEX_HTML = r"""<!doctype html>
         <option value="archived">Archived</option>
       </select>
       <button id="refresh" type="button">Refresh</button>
+    </div>
+    <div class="ai-actions">
+      <button id="ai-classify" class="primary" type="button">AI classify</button>
     </div>
     <div id="sync" class="status"></div>
     <div id="review-summary" class="status"></div>
@@ -302,8 +326,21 @@ INDEX_HTML = r"""<!doctype html>
       </div>
     </aside>
   </main>
+  <dialog id="ai-dialog">
+    <form method="dialog" class="modal">
+      <h2>AI classify</h2>
+      <label for="ai-category">Category</label>
+      <select id="ai-category"></select>
+      <label for="ai-limit">Limit</label>
+      <input id="ai-limit" type="number" min="1" max="500" step="1" value="20">
+      <div class="modal-actions">
+        <button id="ai-cancel" type="button">Cancel</button>
+        <button id="ai-run" class="primary" type="button">Run</button>
+      </div>
+    </form>
+  </dialog>
   <script>
-    const state = { items: [], selected: null, selectedIds: new Set(), skippedReviewIds: new Set() };
+    const state = { items: [], selected: null, selectedIds: new Set(), skippedReviewIds: new Set(), aiTimer: null };
     const $ = (id) => document.getElementById(id);
     const query = $("query"), category = $("category"), status = $("status");
     const list = $("list"), sync = $("sync"), reviewSummary = $("review-summary");
@@ -326,6 +363,14 @@ INDEX_HTML = r"""<!doctype html>
       category.innerHTML = '<option value="">All categories</option>' +
         body.categories.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} (${c.count})</option>`).join("");
       category.value = current;
+      renderAiCategoryOptions(body.categories);
+    }
+
+    function renderAiCategoryOptions(categories) {
+      const current = $("ai-category").value || category.value;
+      $("ai-category").innerHTML = '<option value="">Unclassified only</option>' +
+        categories.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} (${c.count})</option>`).join("");
+      $("ai-category").value = current;
     }
 
     async function loadSyncStatus() {
@@ -372,6 +417,7 @@ INDEX_HTML = r"""<!doctype html>
           <div class="text">${escapeHtml(trimText(item.text, 260))}</div>
           ${item.review_state === "pending" ? `<div class="note">Review: ${escapeHtml(reviewReasonLabel(item.review_reason))}${item.confidence != null ? ` · confidence ${escapeHtml(formatConfidence(item.confidence))}` : ""}</div>` : ""}
           ${item.notes ? `<div class="note">Note: ${escapeHtml(trimText(item.notes, 180))}</div>` : ""}
+          ${mediaPreviewHtml(item)}
           ${badgesHtml(item)}
           <div class="tags">${item.tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
         </article>
@@ -450,6 +496,18 @@ INDEX_HTML = r"""<!doctype html>
       if (item.quoted_tweet) badges.push("quote");
       if (!badges.length) return "";
       return `<div class="badges">${badges.map(value => `<span class="badge">${escapeHtml(value)}</span>`).join("")}</div>`;
+    }
+
+    function mediaPreviewHtml(item) {
+      if (!item.media || !item.media.length) return "";
+      const nodes = item.media.slice(0, 4).map(media => {
+        const label = escapeHtml(media.alt_text || media.type || "media");
+        if (media.type === "photo") {
+          return `<img src="${escapeHtml(media.url)}" alt="${label}" loading="lazy">`;
+        }
+        return `<a href="${escapeHtml(media.url)}" target="_blank" rel="noopener">${escapeHtml(media.type || "media")}</a>`;
+      });
+      return `<div class="item-media">${nodes.join("")}</div>`;
     }
 
     function reviewReasonLabel(value) {
@@ -611,6 +669,70 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
 
+    function openAiDialog() {
+      $("ai-category").value = category.value || "";
+      $("ai-limit").value = $("ai-limit").value || "20";
+      $("ai-dialog").showModal();
+    }
+
+    function closeAiDialog() {
+      $("ai-dialog").close();
+    }
+
+    async function runAiClassify() {
+      const limitValue = Number($("ai-limit").value || 20);
+      if (!Number.isInteger(limitValue) || limitValue < 1 || limitValue > 500) {
+        sync.textContent = "AI classify failed: limit must be between 1 and 500";
+        return;
+      }
+      const targetCategory = $("ai-category").value || "";
+      $("ai-classify").disabled = true;
+      $("ai-run").disabled = true;
+      closeAiDialog();
+      startAiProgress(targetCategory, limitValue);
+      try {
+        const body = await api("/api/classify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider: "ollama",
+            category: targetCategory || null,
+            limit: limitValue,
+            reclassify: Boolean(targetCategory),
+            export_html: true
+          })
+        });
+        stopAiProgress();
+        await Promise.all([loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]);
+        sync.textContent = `AI classified ${body.classified} bookmark(s)${body.category ? ` in ${body.category}` : ""} · exported ${body.exported}`;
+      } catch (error) {
+        stopAiProgress();
+        sync.textContent = `AI classify failed: ${error.message}`;
+      } finally {
+        $("ai-classify").disabled = false;
+        $("ai-run").disabled = false;
+      }
+    }
+
+    function startAiProgress(targetCategory, limitValue) {
+      stopAiProgress();
+      const started = Date.now();
+      const target = targetCategory || "unclassified bookmarks";
+      const render = () => {
+        const elapsed = Math.max(0, Math.round((Date.now() - started) / 1000));
+        sync.textContent = `AI classifying ${target} (${limitValue})... ${elapsed}s elapsed`;
+      };
+      render();
+      state.aiTimer = setInterval(render, 1000);
+    }
+
+    function stopAiProgress() {
+      if (state.aiTimer) {
+        clearInterval(state.aiTimer);
+        state.aiTimer = null;
+      }
+    }
+
     function skipSelected() {
       if (!state.selected || state.selected.review_state !== "pending") return;
       const skippedId = state.selected.tweet_id;
@@ -644,6 +766,9 @@ INDEX_HTML = r"""<!doctype html>
     $("bulk-accept").addEventListener("click", () => bulkUpdateSelected("accept"));
     $("bulk-archive").addEventListener("click", () => bulkUpdateSelected("archive"));
     $("bulk-category-apply").addEventListener("click", () => bulkUpdateSelected("category"));
+    $("ai-classify").addEventListener("click", openAiDialog);
+    $("ai-cancel").addEventListener("click", closeAiDialog);
+    $("ai-run").addEventListener("click", runAiClassify);
     $("open").addEventListener("click", () => { if (state.selected) window.open(state.selected.url, "_blank", "noopener"); });
 
     Promise.all([loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]).catch(error => {

@@ -88,6 +88,17 @@ class OllamaClassifierTest(unittest.TestCase):
 
         self.assertEqual(result.category, "General")
 
+    def test_parse_response_falls_back_for_malformed_json(self) -> None:
+        classifier = OllamaClassifier(categories=["AI", "Programming"])
+        result = classifier._parse_response(
+            '{"category":"AI","tags":["broken"],"confidence":0.7'
+        )
+
+        self.assertEqual(result.category, "General")
+        self.assertEqual(result.tags, [])
+        self.assertEqual(result.confidence, 0.0)
+        self.assertIn("Ollama response", result.reason)
+
     def test_prompt_includes_category_descriptions(self) -> None:
         classifier = OllamaClassifier(
             categories=["Tools", "Productivity"],

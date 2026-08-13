@@ -88,6 +88,7 @@ class OllamaClassifier:
             {
                 "model": self.model,
                 "prompt": prompt,
+                "format": "json",
                 "stream": False,
             }
         ).encode("utf-8")
@@ -131,7 +132,15 @@ class OllamaClassifier:
         )
 
     def _parse_response(self, raw_result: str) -> ClassificationResult:
-        parsed = _loads_json_object(raw_result)
+        try:
+            parsed = _loads_json_object(raw_result)
+        except RuntimeError as exc:
+            return ClassificationResult(
+                category="General",
+                tags=[],
+                confidence=0.0,
+                reason=str(exc),
+            )
         category = str(parsed.get("category") or "General").strip()
         if category not in self.categories:
             category = "General"
@@ -170,7 +179,12 @@ def _loads_json_object(raw_text: str) -> dict:
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
             raise RuntimeError(f"Ollama response is not JSON: {text[:200]}")
-        parsed = json.loads(text[start : end + 1])
+        try:
+            parsed = json.loads(text[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Ollama response JSON could not be parsed: {text[:200]}"
+            ) from exc
 
     if not isinstance(parsed, dict):
         raise RuntimeError("Ollama classification response must be a JSON object")

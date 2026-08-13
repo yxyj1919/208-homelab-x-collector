@@ -1312,6 +1312,18 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("bulkUpdateSelected", INDEX_HTML)
         self.assertIn("/api/bookmarks/bulk", INDEX_HTML)
         self.assertIn("bulk-category", INDEX_HTML)
+        self.assertIn("ai-classify", INDEX_HTML)
+        self.assertIn("ai-dialog", INDEX_HTML)
+        self.assertIn("ai-category", INDEX_HTML)
+        self.assertIn("ai-run", INDEX_HTML)
+        self.assertIn("openAiDialog", INDEX_HTML)
+        self.assertIn("renderAiCategoryOptions", INDEX_HTML)
+        self.assertIn("runAiClassify", INDEX_HTML)
+        self.assertIn("startAiProgress", INDEX_HTML)
+        self.assertIn("elapsed", INDEX_HTML)
+        self.assertIn("/api/classify", INDEX_HTML)
+        self.assertIn("mediaPreviewHtml", INDEX_HTML)
+        self.assertIn("item-media", INDEX_HTML)
 
     def test_web_api_imports_extension_bookmarks(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1364,6 +1376,106 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(list_body["items"][0]["tweet_id"], "9101")
         self.assertEqual(state["last_connector"], "chrome-extension")
         self.assertEqual(state["chrome-extension.source_url"], "https://x.com/i/bookmarks")
+
+    def test_web_api_classifies_bookmarks(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9201",
+                        url="https://x.com/example/status/9201",
+                        text="Docker Compose deployment guide",
+                        author="example",
+                    )
+                ]
+            )
+            store.save_classification(
+                "9201",
+                ClassificationResult(
+                    category="General",
+                    tags=[],
+                    confidence=0.2,
+                    reason="Seeded General category.",
+                ),
+                provider="rules",
+            )
+
+            class Handler(XBookmarksHandler):
+                bookmark_service = BookmarkService(store)
+
+            try:
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            except PermissionError as exc:
+                raise unittest.SkipTest("local port binding is not permitted") from exc
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            try:
+                classify_body = _read_json_url(
+                    f"{base_url}/api/classify",
+                    method="POST",
+                    payload={
+                        "provider": "rules",
+                        "category": "General",
+                        "limit": 1,
+                        "reclassify": True,
+                        "export_html": False,
+                    },
+                )
+                list_body = _read_json_url(f"{base_url}/api/bookmarks?category=DevOps")
+                sync_body = _read_json_url(f"{base_url}/api/sync-status")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+        self.assertEqual(classify_body["classified"], 1)
+        self.assertEqual(classify_body["provider"], "rules")
+        self.assertEqual(list_body["items"][0]["tweet_id"], "9201")
+        self.assertEqual(list_body["items"][0]["category"], "DevOps")
+        self.assertEqual(sync_body["summary"]["connector"], "")
+        self.assertEqual(sync_body["summary"]["classified"], 1)
+
+    def test_bookmark_service_classifies_bookmarks(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            service = BookmarkService(store)
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9301",
+                        url="https://x.com/example/status/9301",
+                        text="Docker Compose deployment guide",
+                        author="example",
+                    )
+                ]
+            )
+            store.save_classification(
+                "9301",
+                ClassificationResult(
+                    category="General",
+                    tags=[],
+                    confidence=0.2,
+                    reason="Seeded General category.",
+                ),
+                provider="rules",
+            )
+
+            result = service.classify_bookmarks(
+                {
+                    "provider": "rules",
+                    "category": "General",
+                    "limit": 1,
+                    "reclassify": True,
+                    "export_html": False,
+                }
+            )
+            rows = store.list_bookmarks(category="DevOps")
+
+        self.assertEqual(result["classified"], 1)
+        self.assertEqual(rows[0]["tweet_id"], "9301")
+        self.assertEqual(rows[0]["classification_provider"], "rules")
 
 
 class StorageMigrationTest(unittest.TestCase):
