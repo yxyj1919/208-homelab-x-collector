@@ -73,6 +73,42 @@ class BookmarkService:
         row = self.store.get_bookmark(tweet_id)
         return {"item": bookmark_payload(row) if row else None}
 
+    def bulk_update_bookmarks(self, payload: dict[str, Any]) -> dict[str, Any]:
+        tweet_ids = payload.get("tweet_ids")
+        if not isinstance(tweet_ids, list) or not all(
+            isinstance(tweet_id, str) for tweet_id in tweet_ids
+        ):
+            raise ValueError("tweet_ids must be a list of strings")
+        tweet_ids = [tweet_id.strip() for tweet_id in tweet_ids if tweet_id.strip()]
+        if not tweet_ids:
+            raise ValueError("tweet_ids must not be empty")
+        if len(tweet_ids) > 500:
+            raise ValueError("tweet_ids must contain at most 500 bookmarks")
+
+        action = payload.get("action")
+        if action == "accept":
+            updates = {"review_state": "accepted"}
+        elif action == "archive":
+            updates = {"archived": True}
+        elif action == "category":
+            category = payload.get("category")
+            if not isinstance(category, str) or not category.strip():
+                raise ValueError("category action requires a non-empty category")
+            updates = {"category": category.strip()}
+        else:
+            raise ValueError("action must be accept, archive, or category")
+
+        updated = 0
+        missing: list[str] = []
+        for tweet_id in tweet_ids:
+            try:
+                self.store.update_bookmark(tweet_id, **updates)
+            except KeyError:
+                missing.append(tweet_id)
+                continue
+            updated += 1
+        return {"updated": updated, "missing": missing}
+
     def import_extension_bookmarks(self, payload: dict[str, Any]) -> dict[str, Any]:
         items = payload.get("items")
         if not isinstance(items, list):

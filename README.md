@@ -181,6 +181,7 @@ PYTHONPATH=src python3 -m xbookmarks.cli web --host 127.0.0.1 --port 8765
 - 标记 read/unread、important、archive。
 - 对 pending review 单条收藏执行 Accept 或临时 Skip。
 - 对 accepted 收藏执行 Mark pending，重新放回 review queue。
+- 对当前列表中选中的多条收藏执行 bulk accept、bulk archive 或 bulk category update。
 - 查看最近同步状态。
 
 Review queue 当前是轻量状态层：新导入记录默认进入 `pending`，低置信度自动分类会保持

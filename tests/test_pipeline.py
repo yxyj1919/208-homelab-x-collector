@@ -901,6 +901,67 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("total=1 pending=1 accepted=0", output.getvalue())
         self.assertIn("new-import\t1", output.getvalue())
 
+    def test_bookmark_service_bulk_updates_selected_bookmarks(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            service = BookmarkService(store)
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/example/status/9001",
+                        text="First note",
+                    ),
+                    Bookmark(
+                        tweet_id="9002",
+                        url="https://x.com/example/status/9002",
+                        text="Second note",
+                    ),
+                    Bookmark(
+                        tweet_id="9003",
+                        url="https://x.com/example/status/9003",
+                        text="Third note",
+                    ),
+                ]
+            )
+
+            accept_result = service.bulk_update_bookmarks(
+                {"action": "accept", "tweet_ids": ["9001", "missing"]}
+            )
+            archive_result = service.bulk_update_bookmarks(
+                {"action": "archive", "tweet_ids": ["9001", "9002"]}
+            )
+            category_result = service.bulk_update_bookmarks(
+                {
+                    "action": "category",
+                    "tweet_ids": ["9002", "9003"],
+                    "category": "VCF",
+                }
+            )
+            row1 = store.get_bookmark("9001")
+            row2 = store.get_bookmark("9002")
+            row3 = store.get_bookmark("9003")
+
+        self.assertEqual(accept_result, {"updated": 1, "missing": ["missing"]})
+        self.assertEqual(archive_result, {"updated": 2, "missing": []})
+        self.assertEqual(category_result, {"updated": 2, "missing": []})
+        self.assertEqual(row1["review_state"], "accepted")
+        self.assertEqual(row1["archived"], 1)
+        self.assertEqual(row2["category"], "VCF")
+        self.assertEqual(row2["category_source"], "manual")
+        self.assertEqual(row2["archived"], 1)
+        self.assertEqual(row3["category"], "VCF")
+
+    def test_bookmark_service_rejects_invalid_bulk_updates(self) -> None:
+        service = BookmarkService(BookmarkStore(Path(":memory:")))
+
+        with self.assertRaisesRegex(ValueError, "tweet_ids"):
+            service.bulk_update_bookmarks({"action": "accept", "tweet_ids": []})
+        with self.assertRaisesRegex(ValueError, "action"):
+            service.bulk_update_bookmarks({"action": "delete", "tweet_ids": ["9001"]})
+        with self.assertRaisesRegex(ValueError, "category"):
+            service.bulk_update_bookmarks({"action": "category", "tweet_ids": ["9001"]})
+
     def test_bookmark_service_normalizes_payloads_and_filters(self) -> None:
         with TemporaryDirectory() as temp_dir:
             store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
@@ -1206,6 +1267,14 @@ class PipelineTest(unittest.TestCase):
                     f"{base_url}/api/bookmarks?status=pending_review"
                 )
                 review_summary = _read_json_url(f"{base_url}/api/review-summary")
+                bulk_body = _read_json_url(
+                    f"{base_url}/api/bookmarks/bulk",
+                    method="POST",
+                    payload={"action": "archive", "tweet_ids": ["9001"]},
+                )
+                archived_body = _read_json_url(
+                    f"{base_url}/api/bookmarks?status=archived"
+                )
             finally:
                 server.shutdown()
                 server.server_close()
@@ -1220,6 +1289,8 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(pending_body["items"], [])
         self.assertEqual(review_summary["pending"], 0)
         self.assertEqual(review_summary["accepted"], 1)
+        self.assertEqual(bulk_body, {"updated": 1, "missing": []})
+        self.assertEqual(archived_body["items"][0]["tweet_id"], "9001")
 
     def test_web_ui_exposes_review_queue_details(self) -> None:
         self.assertIn("Pending review", INDEX_HTML)
@@ -1237,6 +1308,10 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("skippedReviewIds", INDEX_HTML)
         self.assertIn("skipSelected", INDEX_HTML)
         self.assertIn("markPendingSelected", INDEX_HTML)
+        self.assertIn("bulk-actions", INDEX_HTML)
+        self.assertIn("bulkUpdateSelected", INDEX_HTML)
+        self.assertIn("/api/bookmarks/bulk", INDEX_HTML)
+        self.assertIn("bulk-category", INDEX_HTML)
 
     def test_web_api_imports_extension_bookmarks(self) -> None:
         with TemporaryDirectory() as temp_dir:

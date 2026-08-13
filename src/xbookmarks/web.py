@@ -67,6 +67,9 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/bookmarks/bulk":
+            self._handle_bulk_bookmarks()
+            return
         if parsed.path == "/api/extension/bookmarks":
             self._handle_extension_bookmarks()
             return
@@ -108,6 +111,15 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
         except KeyError as exc:
             self._send_error(HTTPStatus.NOT_FOUND, str(exc))
             return
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        self._send_json(response)
+
+    def _handle_bulk_bookmarks(self) -> None:
+        try:
+            payload = self._read_json()
+            response = self.bookmark_service.bulk_update_bookmarks(payload)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
@@ -198,6 +210,8 @@ INDEX_HTML = r"""<!doctype html>
     .list { display: grid; gap: 8px; align-content: start; }
     .item { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px; cursor: pointer; }
     .item[aria-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+    .item-head { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; }
+    .item-head input { width: auto; margin-top: 2px; }
     .meta, .tags, .sync { color: var(--muted); font-size: 13px; line-height: 1.4; }
     .text { white-space: pre-wrap; margin: 8px 0; line-height: 1.45; }
     .note { color: #344054; background: #f2f4f7; border-left: 3px solid var(--accent); margin-top: 8px; padding: 7px 9px; font-size: 13px; line-height: 1.4; }
@@ -219,9 +233,12 @@ INDEX_HTML = r"""<!doctype html>
     .checks label { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: var(--text); }
     .checks input { width: auto; }
     .actions { display: flex; gap: 8px; margin-top: 12px; }
+    .bulk-actions { display: grid; grid-template-columns: auto auto auto minmax(160px, 220px) auto; gap: 8px; align-items: center; margin-bottom: 10px; }
+    .bulk-actions span { color: var(--muted); font-size: 13px; }
     .empty { color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; padding: 24px; text-align: center; }
     @media (max-width: 860px) {
       .toolbar { grid-template-columns: 1fr; }
+      .bulk-actions { grid-template-columns: 1fr; }
       main { grid-template-columns: 1fr; padding: 12px; }
       header { padding: 14px 12px; }
       aside { position: static; }
@@ -250,6 +267,13 @@ INDEX_HTML = r"""<!doctype html>
   </header>
   <main>
     <section>
+      <div class="bulk-actions">
+        <span id="bulk-count">0 selected</span>
+        <button id="bulk-accept" type="button">Accept</button>
+        <button id="bulk-archive" type="button">Archive</button>
+        <input id="bulk-category" autocomplete="off" placeholder="Category">
+        <button id="bulk-category-apply" type="button">Apply category</button>
+      </div>
       <div id="list" class="list"></div>
     </section>
     <aside>
@@ -279,7 +303,7 @@ INDEX_HTML = r"""<!doctype html>
     </aside>
   </main>
   <script>
-    const state = { items: [], selected: null, skippedReviewIds: new Set() };
+    const state = { items: [], selected: null, selectedIds: new Set(), skippedReviewIds: new Set() };
     const $ = (id) => document.getElementById(id);
     const query = $("query"), category = $("category"), status = $("status");
     const list = $("list"), sync = $("sync"), reviewSummary = $("review-summary");
@@ -328,6 +352,7 @@ INDEX_HTML = r"""<!doctype html>
       if (status.value) params.set("status", status.value);
       const body = await api(`/api/bookmarks?${params}`);
       state.items = body.items.filter(item => !state.skippedReviewIds.has(item.tweet_id));
+      pruneSelectedIds();
       renderList();
     }
 
@@ -335,11 +360,15 @@ INDEX_HTML = r"""<!doctype html>
       if (!state.items.length) {
         list.innerHTML = '<div class="empty">No bookmarks</div>';
         selectItem(null);
+        renderBulkState();
         return;
       }
       list.innerHTML = state.items.map(item => `
         <article class="item" data-id="${escapeHtml(item.tweet_id)}" aria-selected="${state.selected && state.selected.tweet_id === item.tweet_id}">
-          <div class="meta">${escapeHtml(item.category)} · ${escapeHtml(authorLabel(item))} · ${escapeHtml(item.created_at || "Unknown date")} · ${escapeHtml(item.read_state)}${item.important ? " · important" : ""}${item.review_state === "pending" ? " · pending review" : ""}${item.archived ? " · archived" : ""}</div>
+          <div class="item-head">
+            <input class="bulk-check" type="checkbox" data-id="${escapeHtml(item.tweet_id)}" aria-label="Select ${escapeHtml(item.tweet_id)}" ${state.selectedIds.has(item.tweet_id) ? "checked" : ""}>
+            <div class="meta">${escapeHtml(item.category)} · ${escapeHtml(authorLabel(item))} · ${escapeHtml(item.created_at || "Unknown date")} · ${escapeHtml(item.read_state)}${item.important ? " · important" : ""}${item.review_state === "pending" ? " · pending review" : ""}${item.archived ? " · archived" : ""}</div>
+          </div>
           <div class="text">${escapeHtml(trimText(item.text, 260))}</div>
           ${item.review_state === "pending" ? `<div class="note">Review: ${escapeHtml(reviewReasonLabel(item.review_reason))}${item.confidence != null ? ` · confidence ${escapeHtml(formatConfidence(item.confidence))}` : ""}</div>` : ""}
           ${item.notes ? `<div class="note">Note: ${escapeHtml(trimText(item.notes, 180))}</div>` : ""}
@@ -350,12 +379,17 @@ INDEX_HTML = r"""<!doctype html>
       for (const node of list.querySelectorAll(".item")) {
         node.addEventListener("click", () => selectItem(state.items.find(item => item.tweet_id === node.dataset.id)));
       }
+      for (const node of list.querySelectorAll(".bulk-check")) {
+        node.addEventListener("click", event => event.stopPropagation());
+        node.addEventListener("change", () => toggleBulkSelection(node.dataset.id, node.checked));
+      }
       if (state.selected) {
         const fresh = state.items.find(item => item.tweet_id === state.selected.tweet_id);
         selectItem(fresh || state.items[0]);
       } else {
         selectItem(state.items[0]);
       }
+      renderBulkState();
     }
 
     function selectItem(item) {
@@ -377,6 +411,28 @@ INDEX_HTML = r"""<!doctype html>
       $("accept-review").disabled = item.review_state !== "pending";
       $("skip-review").disabled = item.review_state !== "pending";
       $("mark-pending").disabled = item.review_state === "pending";
+    }
+
+    function toggleBulkSelection(tweetId, selected) {
+      if (!tweetId) return;
+      if (selected) state.selectedIds.add(tweetId);
+      else state.selectedIds.delete(tweetId);
+      renderBulkState();
+    }
+
+    function pruneSelectedIds() {
+      const visibleIds = new Set(state.items.map(item => item.tweet_id));
+      for (const tweetId of Array.from(state.selectedIds)) {
+        if (!visibleIds.has(tweetId)) state.selectedIds.delete(tweetId);
+      }
+    }
+
+    function renderBulkState() {
+      const count = state.selectedIds.size;
+      $("bulk-count").textContent = `${count} selected`;
+      $("bulk-accept").disabled = count === 0;
+      $("bulk-archive").disabled = count === 0;
+      $("bulk-category-apply").disabled = count === 0;
     }
 
     function authorLabel(item) {
@@ -528,6 +584,33 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
 
+    async function bulkUpdateSelected(action) {
+      const tweetIds = Array.from(state.selectedIds);
+      if (!tweetIds.length) return;
+      const payload = { action, tweet_ids: tweetIds };
+      if (action === "category") {
+        const categoryValue = $("bulk-category").value.trim();
+        if (!categoryValue) {
+          sync.textContent = "Bulk category failed: category is required";
+          return;
+        }
+        payload.category = categoryValue;
+      }
+      sync.textContent = "Updating selected...";
+      try {
+        const body = await api("/api/bookmarks/bulk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        state.selectedIds.clear();
+        await Promise.all([loadCategories(), loadReviewSummary(), loadItems()]);
+        sync.textContent = `Updated ${body.updated} selected bookmark(s)${body.missing && body.missing.length ? ` · missing ${body.missing.length}` : ""}`;
+      } catch (error) {
+        sync.textContent = `Bulk update failed: ${error.message}`;
+      }
+    }
+
     function skipSelected() {
       if (!state.selected || state.selected.review_state !== "pending") return;
       const skippedId = state.selected.tweet_id;
@@ -558,6 +641,9 @@ INDEX_HTML = r"""<!doctype html>
     $("accept-review").addEventListener("click", acceptSelected);
     $("skip-review").addEventListener("click", skipSelected);
     $("mark-pending").addEventListener("click", markPendingSelected);
+    $("bulk-accept").addEventListener("click", () => bulkUpdateSelected("accept"));
+    $("bulk-archive").addEventListener("click", () => bulkUpdateSelected("archive"));
+    $("bulk-category-apply").addEventListener("click", () => bulkUpdateSelected("category"));
     $("open").addEventListener("click", () => { if (state.selected) window.open(state.selected.url, "_blank", "noopener"); });
 
     Promise.all([loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]).catch(error => {
