@@ -22,6 +22,7 @@ v0.1.0 是 JSON 导入版 MVP，适合作为本地收藏归档工具的第一版
 - 可选使用 Ollama 进行本地或远端模型分类。
 - 手工修正单条收藏分类，并避免后续自动分类默认覆盖人工结果。
 - 为每条收藏生成独立 HTML 文件，并按分类目录保存。
+- 为每条收藏生成带 Obsidian front matter 的独立 Markdown 文件。
 - 生成全局索引页面。
 
 未包含在 v0.1.0：
@@ -29,11 +30,9 @@ v0.1.0 是 JSON 导入版 MVP，适合作为本地收藏归档工具的第一版
 - 直接登录 X/Twitter 账号同步收藏。
 - X API / OAuth 集成。
 - 定时任务安装脚本。
-- Obsidian / Markdown 导出。
 - 多用户或远端服务部署。
 
-后续 Obsidian / Markdown 导出需要等数据模型稳定后再做。Markdown front matter
-字段固定为：
+Obsidian / Markdown 导出的 front matter 字段固定为：
 
 - `tweet_id`
 - `url`
@@ -114,10 +113,25 @@ python3 -m xbookmarks.cli run-log --limit 10
 python3 -m xbookmarks.cli import samples/bookmarks.json
 python3 -m xbookmarks.cli classify
 python3 -m xbookmarks.cli export-html
+python3 -m xbookmarks.cli export-markdown --archive-dir obsidian-archive
 ```
 
 导入时会按 `tweet_id` 去重，并用内容 hash 检测同一收藏是否发生变化。输出中的
 `inserted`、`updated`、`unchanged` 和 `duplicates` 可用于确认增量导入效果。
+
+Markdown / Obsidian 导出：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli --db data/bookmarks.sqlite export-markdown \
+  --archive-dir obsidian-archive
+```
+
+输出结构按分类分目录，单条收藏写成
+`obsidian-archive/<Category>/<date>_<tweet_id>.md`，索引写入
+`obsidian-archive/_index/index.md`。每个 Markdown 文件包含固定 front matter：
+`tweet_id`、`url`、`author`、`created_at`、`category`、`tags`、`source`、
+`provider`、`confidence`、`read_state`。正文包含原文、原链接、备注、分类原因，以及
+可从 `raw_json` 派生出的 media、card、quoted tweet 链接。
 
 全文搜索使用 SQLite FTS5，而不是普通 `LIKE`。搜索字段包括 `text`、`author`、
 `url`、`category`、`tags` 和 `notes`：

@@ -28,10 +28,32 @@ def export_html(store: BookmarkStore, archive_dir: Path) -> int:
     return count
 
 
+def export_markdown(store: BookmarkStore, archive_dir: Path) -> int:
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    rows = store.iter_bookmarks()
+    count = 0
+    for row in rows:
+        category = row.get("category") or "General"
+        category_dir = archive_dir / _safe_path_segment(category)
+        category_dir.mkdir(parents=True, exist_ok=True)
+        file_path = category_dir / _bookmark_markdown_filename(row)
+        file_path.write_text(_render_markdown_bookmark(row), encoding="utf-8")
+        count += 1
+
+    index_dir = archive_dir / "_index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    (index_dir / "index.md").write_text(_render_markdown_index(rows), encoding="utf-8")
+    return count
+
+
 def _bookmark_filename(row: dict) -> str:
     date = (row.get("created_at") or "unknown")[:10]
     date = re.sub(r"[^0-9A-Za-z_-]+", "-", date).strip("-") or "unknown"
     return f"{date}_{_safe_path_segment(row['tweet_id'])}.html"
+
+
+def _bookmark_markdown_filename(row: dict) -> str:
+    return _bookmark_filename(row).removesuffix(".html") + ".md"
 
 
 def _safe_path_segment(value: str) -> str:
@@ -111,6 +133,145 @@ def _render_bookmark(row: dict) -> str:
 </body>
 </html>
 """
+
+
+def _render_markdown_bookmark(row: dict) -> str:
+    tags = _tags(row)
+    raw = _raw_json(row)
+    author = _author_profile(raw)
+    author_label = _author_label(row, author)
+    lines = [
+        "---",
+        f"tweet_id: {_yaml_scalar(row['tweet_id'])}",
+        f"url: {_yaml_scalar(row['url'])}",
+        f"author: {_yaml_scalar(row.get('author') or '')}",
+        f"created_at: {_yaml_scalar(row.get('created_at') or '')}",
+        f"category: {_yaml_scalar(row.get('category') or 'General')}",
+        "tags:",
+    ]
+    if tags:
+        lines.extend(f"  - {_yaml_scalar(tag)}" for tag in tags)
+    else:
+        lines.append("  []")
+    lines.extend(
+        [
+            f"source: {_yaml_scalar(_markdown_source(raw))}",
+            f"provider: {_yaml_scalar(row.get('classification_provider') or 'unknown')}",
+            f"confidence: {_yaml_number(row.get('confidence'))}",
+            f"read_state: {_yaml_scalar(row.get('read_state') or 'unread')}",
+            "---",
+            "",
+            f"# {author_label}",
+            "",
+            row["text"].strip(),
+            "",
+            f"[Original]({row['url']})",
+        ]
+    )
+
+    media = _markdown_media(raw)
+    if media:
+        lines.extend(["", "## Media", "", *media])
+
+    card = _markdown_card(raw)
+    if card:
+        lines.extend(["", "## Card", "", card])
+
+    quote = _markdown_quote(raw)
+    if quote:
+        lines.extend(["", "## Quoted Tweet", "", quote])
+
+    notes = _text(row.get("notes"))
+    if notes:
+        lines.extend(["", "## Notes", "", notes])
+
+    reason = _text(row.get("reason"))
+    if reason:
+        lines.extend(["", "## Classification", "", reason])
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _yaml_scalar(value: object) -> str:
+    text = "" if value is None else str(value)
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _yaml_number(value: object) -> str:
+    if value is None or value == "":
+        return "null"
+    try:
+        return str(float(value))
+    except (TypeError, ValueError):
+        return "null"
+
+
+def _markdown_source(raw: dict) -> str:
+    source = _text(raw.get("source"))
+    if source:
+        return source
+    if isinstance(raw.get("folders"), list):
+        return "xarchive-json"
+    return "json-file"
+
+
+def _markdown_media(raw: dict) -> list[str]:
+    media = raw.get("media")
+    if not isinstance(media, list):
+        return []
+    lines = []
+    for item in media:
+        if not isinstance(item, dict):
+            continue
+        url = _text(item.get("url") or item.get("media_url_https"))
+        if not url:
+            continue
+        media_type = _text(item.get("type")) or "media"
+        alt = _text(item.get("alt_text")) or media_type
+        if media_type == "photo":
+            lines.append(f"![{_markdown_link_text(alt)}]({url})")
+        else:
+            lines.append(f"- [{_markdown_link_text(media_type)}]({url})")
+    return lines
+
+
+def _markdown_card(raw: dict) -> str | None:
+    card = raw.get("card")
+    if not isinstance(card, dict):
+        return None
+    title = _text(card.get("title")) or "Linked card"
+    description = _text(card.get("description"))
+    url = _text(card.get("url"))
+    pieces = []
+    if url:
+        pieces.append(f"[{_markdown_link_text(title)}]({url})")
+    else:
+        pieces.append(title)
+    if description:
+        pieces.append(description)
+    return "\n\n".join(pieces)
+
+
+def _markdown_quote(raw: dict) -> str | None:
+    quoted = raw.get("quoted_tweet")
+    if not isinstance(quoted, dict):
+        return None
+    tweet_id = _text(quoted.get("tweet_id") or quoted.get("id"))
+    text = _text(quoted.get("full_text") or quoted.get("text"))
+    author = quoted.get("author") if isinstance(quoted.get("author"), dict) else {}
+    author_name = (
+        _text(author.get("screen_name") or author.get("username"))
+        or _text(author.get("name"))
+        or "Quoted tweet"
+    )
+    link = f"https://x.com/i/status/{tweet_id}" if tweet_id else None
+    header = f"[{_markdown_link_text(author_name)}]({link})" if link else author_name
+    return f"{header}\n\n{text}" if text else header
+
+
+def _markdown_link_text(value: str) -> str:
+    return value.replace("[", "\\[").replace("]", "\\]")
 
 
 def _raw_json(row: dict) -> dict:
@@ -259,3 +420,26 @@ def _render_index(rows: list[dict]) -> str:
 </body>
 </html>
 """
+
+
+def _render_markdown_index(rows: list[dict]) -> str:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(row.get("category") or "General", []).append(row)
+
+    lines = ["# X Bookmarks Archive", "", f"{len(rows)} bookmarks exported.", ""]
+    for category in sorted(groups):
+        lines.extend([f"## {category} ({len(groups[category])})", ""])
+        for row in groups[category]:
+            file_name = _bookmark_markdown_filename(row)
+            href = f"../{_safe_path_segment(category)}/{file_name}"
+            title = row.get("text", "").strip().replace("\n", " ")
+            if len(title) > 120:
+                title = title[:117] + "..."
+            lines.append(
+                f"- [{_markdown_link_text(title)}]({href}) - "
+                f"{row.get('author') or 'Unknown'} - "
+                f"{row.get('created_at') or 'Unknown date'}"
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"

@@ -24,7 +24,7 @@ from .connectors import (
     SyncBatch,
     build_connector,
 )
-from .exporter import export_html
+from .exporter import export_html, export_markdown
 from .models import ClassificationResult
 from .providers import (
     PROVIDER_NAMES,
@@ -150,6 +150,9 @@ def main(argv: list[str] | None = None) -> int:
 
     export_parser = subparsers.add_parser("export-html")
     export_parser.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE)
+
+    export_markdown_parser = subparsers.add_parser("export-markdown")
+    export_markdown_parser.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE)
 
     search_parser = subparsers.add_parser("search")
     search_parser.add_argument("query")
@@ -363,6 +366,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "export-html":
         count = export_html(store, args.archive_dir)
         print(f"Exported {count} bookmark HTML file(s) to {args.archive_dir}.")
+        return 0
+
+    if args.command == "export-markdown":
+        count = export_markdown(store, args.archive_dir)
+        print(f"Exported {count} bookmark Markdown file(s) to {args.archive_dir}.")
         return 0
 
     if args.command == "search":
@@ -648,7 +656,9 @@ def _classify(
         result = provider_instance.classifier.classify(
             f"{row.get('text') or ''} {row.get('author') or ''}"
         )
-        store.save_classification(row["tweet_id"], result)
+        store.save_classification(
+            row["tweet_id"], result, provider=provider_instance.name
+        )
     return len(rows)
 
 
@@ -834,6 +844,7 @@ def _apply_xarchive_metadata(store: BookmarkStore, batch: SyncBatch) -> int:
                 reason="Imported from xarchive bookmark folders.",
             ),
             source="auto",
+            provider="xarchive-json",
         )
         updated += 1
     return updated

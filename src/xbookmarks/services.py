@@ -148,7 +148,7 @@ class BookmarkService:
         rows = self.store.iter_bookmarks(only_unclassified=True, skip_manual=True)
         for row in rows:
             result = classifier.classify(f"{row.get('text') or ''} {row.get('author') or ''}")
-            self.store.save_classification(row["tweet_id"], result)
+            self.store.save_classification(row["tweet_id"], result, provider="rules")
         return len(rows)
 
     def set_bookmark_category(
@@ -168,6 +168,7 @@ class BookmarkService:
                 reason=reason,
             ),
             source="manual",
+            provider="manual",
         )
 
 
@@ -265,6 +266,7 @@ def bookmark_payload(row: dict[str, Any]) -> dict[str, Any]:
         "category_source": row.get("category_source"),
         "tags": _json_list(row.get("tags_json")),
         "confidence": row.get("confidence"),
+        "provider": row.get("classification_provider"),
         "reason": row.get("reason"),
         "notes": row.get("notes") or "",
         "read_state": row.get("read_state") or "unread",

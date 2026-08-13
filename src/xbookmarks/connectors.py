@@ -406,7 +406,7 @@ def _x_record_to_bookmark(
         text=text,
         author=author,
         created_at=_clean_text(record.get("created_at")),
-        raw=record,
+        raw={**record, "source": "x-api"},
     )
 
 

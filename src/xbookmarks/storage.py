@@ -10,7 +10,7 @@ from typing import Iterable
 from .models import Bookmark, ClassificationResult
 
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     tags_json TEXT NOT NULL DEFAULT '[]',
     confidence REAL,
     reason TEXT,
+    classification_provider TEXT,
     notes TEXT,
     read_state TEXT NOT NULL DEFAULT 'unread',
     important INTEGER NOT NULL DEFAULT 0,
@@ -150,6 +151,10 @@ class BookmarkStore:
         if version < 7:
             self._migrate_to_v7(conn)
             self._record_migration(conn, 7)
+            version = 7
+        if version < 8:
+            self._migrate_to_v8(conn)
+            self._record_migration(conn, 8)
 
     def _migrate_to_v2(self, conn: sqlite3.Connection) -> None:
         columns = self._bookmark_columns(conn)
@@ -339,6 +344,11 @@ class BookmarkStore:
             if name not in columns:
                 conn.execute(f"ALTER TABLE run_logs ADD COLUMN {name} {definition}")
 
+    def _migrate_to_v8(self, conn: sqlite3.Connection) -> None:
+        columns = self._bookmark_columns(conn)
+        if "classification_provider" not in columns:
+            conn.execute("ALTER TABLE bookmarks ADD COLUMN classification_provider TEXT")
+
     def _schema_version(self, conn: sqlite3.Connection) -> int:
         exists = conn.execute(
             """
@@ -507,7 +517,8 @@ class BookmarkStore:
                 f"""
                 SELECT tweet_id, url, text, author, created_at, raw_json, content_hash,
                        change_count, first_seen_at, last_seen_at, category,
-                       category_source, tags_json, confidence, reason, notes,
+                       category_source, tags_json, confidence, reason,
+                       classification_provider, notes,
                        read_state, important, archived, export_path
                 FROM bookmarks
                 {where}
@@ -519,14 +530,19 @@ class BookmarkStore:
         return [dict(row) for row in rows]
 
     def save_classification(
-        self, tweet_id: str, result: ClassificationResult, source: str = "auto"
+        self,
+        tweet_id: str,
+        result: ClassificationResult,
+        source: str = "auto",
+        provider: str | None = None,
     ) -> None:
         with self.connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE bookmarks
                 SET category = ?, category_source = ?, tags_json = ?,
-                    confidence = ?, reason = ?, updated_at = CURRENT_TIMESTAMP
+                    confidence = ?, reason = ?, classification_provider = ?,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE tweet_id = ?
                 """,
                 (
@@ -535,6 +551,7 @@ class BookmarkStore:
                     json.dumps(result.tags, ensure_ascii=False),
                     result.confidence,
                     result.reason,
+                    provider,
                     tweet_id,
                 ),
             )
@@ -563,6 +580,7 @@ class BookmarkStore:
                     "category_source = 'manual'",
                     "confidence = 1.0",
                     "reason = 'Manually adjusted by user.'",
+                    "classification_provider = 'manual'",
                 ]
             )
             params.append(category.strip() or None)
@@ -639,7 +657,8 @@ class BookmarkStore:
                 """
                 SELECT b.tweet_id, b.url, b.text, b.author, b.created_at,
                        b.category, b.category_source, b.tags_json, b.confidence,
-                       b.notes, bm25(bookmarks_fts) AS rank
+                       b.classification_provider, b.notes,
+                       bm25(bookmarks_fts) AS rank
                 FROM bookmarks_fts
                 JOIN bookmarks AS b ON b.tweet_id = bookmarks_fts.tweet_id
                 WHERE bookmarks_fts MATCH ?
@@ -658,8 +677,9 @@ class BookmarkStore:
                 """
                 SELECT b.tweet_id, b.url, b.text, b.author, b.created_at,
                        b.category, b.category_source, b.tags_json, b.confidence,
-                       b.reason, b.notes, b.read_state, b.important, b.archived,
-                       b.export_path, b.raw_json, b.updated_at
+                       b.reason, b.classification_provider, b.notes,
+                       b.read_state, b.important, b.archived, b.export_path,
+                       b.raw_json, b.updated_at
                 FROM bookmarks AS b
                 WHERE b.tweet_id = ?
                 """,
@@ -725,8 +745,9 @@ class BookmarkStore:
                 f"""
                 SELECT b.tweet_id, b.url, b.text, b.author, b.created_at,
                        b.category, b.category_source, b.tags_json, b.confidence,
-                       b.reason, b.notes, b.read_state, b.important, b.archived,
-                       b.export_path, b.raw_json, {rank_sql} b.updated_at
+                       b.reason, b.classification_provider, b.notes,
+                       b.read_state, b.important, b.archived, b.export_path,
+                       b.raw_json, {rank_sql} b.updated_at
                 FROM {from_sql}
                 {where}
                 ORDER BY {order_sql}

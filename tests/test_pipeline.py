@@ -24,11 +24,11 @@ from xbookmarks.connectors import (
     build_connector,
     read_bearer_token,
 )
-from xbookmarks.exporter import export_html
+from xbookmarks.exporter import export_html, export_markdown
 from xbookmarks.models import Bookmark, ClassificationResult
 from xbookmarks.secrets import SecretStore
 from xbookmarks.services import BookmarkService
-from xbookmarks.storage import BookmarkStore
+from xbookmarks.storage import CURRENT_SCHEMA_VERSION, BookmarkStore
 from xbookmarks.web import XBookmarksHandler
 
 
@@ -155,6 +155,108 @@ class PipelineTest(unittest.TestCase):
 
             self.assertFalse((archive / "Programming" / "2026-08-10_9001.html").exists())
             self.assertTrue((archive / "DevOps" / "2026-08-10_9001.html").exists())
+
+    def test_export_markdown_writes_obsidian_front_matter(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            store = BookmarkStore(base / "bookmarks.sqlite")
+            archive = base / "obsidian"
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/example/status/9001",
+                        text="VMware Cloud Foundation note",
+                        author="vmw_notes",
+                        created_at="2026-08-10T10:00:00Z",
+                        raw={
+                            "source": "chrome-extension",
+                            "media": [
+                                {
+                                    "type": "photo",
+                                    "url": "https://example.com/image.jpg",
+                                    "alt_text": "diagram",
+                                }
+                            ],
+                        },
+                    )
+                ]
+            )
+            store.save_classification(
+                "9001",
+                ClassificationResult(
+                    category="VCF",
+                    tags=["vmware", "homelab"],
+                    confidence=0.95,
+                    reason="Matched VCF keywords.",
+                ),
+                provider="rules",
+            )
+            store.update_bookmark("9001", read_state="read", notes="Review later")
+
+            count = export_markdown(store, archive)
+            markdown_path = archive / "VCF" / "2026-08-10_9001.md"
+            markdown_file_exists = markdown_path.exists()
+            content = markdown_path.read_text(encoding="utf-8")
+
+        self.assertEqual(count, 1)
+        self.assertTrue(markdown_file_exists)
+        self.assertIn('tweet_id: "9001"', content)
+        self.assertIn('url: "https://x.com/example/status/9001"', content)
+        self.assertIn('author: "vmw_notes"', content)
+        self.assertIn('created_at: "2026-08-10T10:00:00Z"', content)
+        self.assertIn('category: "VCF"', content)
+        self.assertIn('  - "vmware"', content)
+        self.assertIn('  - "homelab"', content)
+        self.assertIn('source: "chrome-extension"', content)
+        self.assertIn('provider: "rules"', content)
+        self.assertIn("confidence: 0.95", content)
+        self.assertIn('read_state: "read"', content)
+        self.assertIn("VMware Cloud Foundation note", content)
+        self.assertIn("![diagram](https://example.com/image.jpg)", content)
+        self.assertIn("Review later", content)
+
+    def test_export_markdown_command_uses_archive_dir(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            sample = base / "bookmark.json"
+            archive = base / "obsidian"
+            sample.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "9001",
+                            "text": "Kubernetes cluster note",
+                            "created_at": "2026-08-10T10:00:00Z",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            main(["--db", str(db), "run", "--input", str(sample)])
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "--db",
+                        str(db),
+                        "export-markdown",
+                        "--archive-dir",
+                        str(archive),
+                    ]
+                )
+
+            markdown_path = archive / "Kubernetes" / "2026-08-10_9001.md"
+            index_path = archive / "_index" / "index.md"
+            markdown_file_exists = markdown_path.exists()
+            index_file_exists = index_path.exists()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Exported 1 bookmark Markdown file(s)", output.getvalue())
+        self.assertTrue(markdown_file_exists)
+        self.assertTrue(index_file_exists)
 
     def test_manual_category_is_not_overwritten_by_reclassify_by_default(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1114,7 +1216,8 @@ class StorageMigrationTest(unittest.TestCase):
         self.assertIn("read_state", columns)
         self.assertIn("important", columns)
         self.assertIn("archived", columns)
-        self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7])
+        self.assertIn("classification_provider", columns)
+        self.assertEqual(versions, list(range(1, CURRENT_SCHEMA_VERSION + 1)))
         self.assertIn("idx_bookmarks_category", indexes)
         self.assertIn("idx_bookmarks_created_at", indexes)
         self.assertIn("bookmarks_fts", tables)
@@ -1127,7 +1230,7 @@ class StorageMigrationTest(unittest.TestCase):
 
             version = store.schema_version()
 
-        self.assertEqual(version, 7)
+        self.assertEqual(version, CURRENT_SCHEMA_VERSION)
 
     def test_init_migrates_run_log_metadata_columns(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1195,7 +1298,7 @@ class StorageMigrationTest(unittest.TestCase):
                     "SELECT MAX(version) FROM schema_migrations"
                 ).fetchone()[0]
 
-        self.assertEqual(version, 7)
+        self.assertEqual(version, CURRENT_SCHEMA_VERSION)
         self.assertIn("connector", columns)
         self.assertIn("cursor_before", columns)
         self.assertIn("cursor_after", columns)
