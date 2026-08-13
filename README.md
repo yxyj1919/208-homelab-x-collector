@@ -62,11 +62,12 @@ python3 -m pytest
 运行数据默认写入：
 
 - SQLite 数据库：`data/bookmarks.sqlite`
+- 原始 JSON 备份：`data/json-backups/raw/`
 - HTML 归档：`archive/`
 - 分类配置：`config/categories.yaml`
 
 `data/`、`archive/`、`archive-*/` 和 `real-bookmarks.json` 是本地运行数据，默认不进入 Git。
-备份时优先保留 SQLite 数据库、分类配置和需要长期保存的 HTML 归档目录。
+备份时优先保留 SQLite 数据库、原始 JSON 备份、分类配置和需要长期保存的 HTML 归档目录。
 
 ## Quick Start
 
@@ -272,6 +273,11 @@ python3 -m xbookmarks.cli import samples/bookmarks.json --connector json-file
 python3 -m xbookmarks.cli run --input samples/bookmarks.json --connector json-file
 python3 -m xbookmarks.cli sync-status
 ```
+
+`import` 和 `run` 默认会把本次同步的原始 JSON 保存到
+`data/json-backups/raw/`。文件类 connector 会复制输入 JSON，非文件类 connector 会保存
+每条收藏的原始记录。可用 `--json-backup-dir <dir>` 改目录，或用 `--no-json-backup`
+关闭。
 
 这个抽象用于后续接入 X API / OAuth 或其他同步来源。分类、去重、人工分类保护和 HTML
 导出流程不依赖具体 connector。

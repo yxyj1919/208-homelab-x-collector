@@ -625,6 +625,76 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(state["json-file.source_path"], str(sample))
         self.assertRegex(state["json-file.cursor"], r"^\d+:\d+$")
 
+    def test_run_writes_raw_json_backup_by_default(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            sample = base / "bookmarks.json"
+            backup_dir = base / "json-backups"
+            payload = [
+                {
+                    "id": "9001",
+                    "text": "Python programming",
+                    "extra": {"source": "original-json"},
+                }
+            ]
+            sample.write_text(json.dumps(payload), encoding="utf-8")
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "--db",
+                        str(db),
+                        "run",
+                        "--input",
+                        str(sample),
+                        "--json-backup-dir",
+                        str(backup_dir),
+                    ]
+                )
+
+            backups = list(backup_dir.glob("*-json-file-bookmarks.json"))
+            backup_payload = (
+                json.loads(backups[0].read_text(encoding="utf-8")) if backups else None
+            )
+            state = BookmarkStore(db).sync_state()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backup_payload, payload)
+        self.assertEqual(state["json-file.json_backup_path"], str(backups[0]))
+        self.assertIn("json_backup=", output.getvalue())
+
+    def test_import_can_disable_raw_json_backup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            db = base / "bookmarks.sqlite"
+            sample = base / "bookmarks.json"
+            backup_dir = base / "json-backups"
+            sample.write_text(
+                json.dumps([{"id": "9001", "text": "Python programming"}]),
+                encoding="utf-8",
+            )
+
+            exit_code = main(
+                [
+                    "--db",
+                    str(db),
+                    "import",
+                    str(sample),
+                    "--no-json-backup",
+                    "--json-backup-dir",
+                    str(backup_dir),
+                ]
+            )
+
+            state = BookmarkStore(db).sync_state()
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(backup_dir.exists())
+        self.assertNotIn("json-file.json_backup_path", state)
+
     def test_changed_auto_classified_bookmark_is_marked_for_reclassification(self) -> None:
         with TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -40,6 +41,7 @@ from .web import run_web_server
 
 DEFAULT_DB = Path("data/bookmarks.sqlite")
 DEFAULT_ARCHIVE = Path("archive")
+DEFAULT_JSON_BACKUP_DIR = Path("data/json-backups/raw")
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "qwen2.5:7b"
 DEFAULT_OLLAMA_TIMEOUT = 180
@@ -75,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     import_parser.add_argument(
         "--connector", choices=CONNECTOR_NAMES, default="json-file"
     )
+    _add_json_backup_args(import_parser)
     _add_connector_args(import_parser)
 
     capability_parser = subparsers.add_parser("capability-check")
@@ -165,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_connector_args(run_parser)
     run_parser.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE)
+    _add_json_backup_args(run_parser)
     run_parser.add_argument("--reclassify", action="store_true")
     run_parser.add_argument(
         "--include-manual",
@@ -229,12 +233,23 @@ def main(argv: list[str] | None = None) -> int:
             x_page_size=args.x_page_size,
             x_max_pages=args.x_max_pages,
         )
+        json_backup_path = _maybe_write_json_backup(
+            store,
+            batch,
+            enabled=args.json_backup,
+            backup_dir=args.json_backup_dir,
+            input_path=args.input,
+        )
         result = store.upsert_bookmarks(batch.bookmarks)
         _apply_xarchive_metadata(store, batch)
+        backup_details = (
+            f" json_backup={json_backup_path}" if json_backup_path is not None else ""
+        )
         print(
             f"Imported {result.imported} bookmark(s): "
             f"inserted={result.inserted} updated={result.updated} "
             f"unchanged={result.unchanged} duplicates={result.duplicates}"
+            f"{backup_details}"
         )
         return 0
 
@@ -417,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         import_summary = None
         classified = 0
         exported = 0
+        json_backup_path: Path | None = None
         batch: SyncBatch | None = None
         try:
             batch = _sync_bookmarks(
@@ -430,6 +446,13 @@ def main(argv: list[str] | None = None) -> int:
                 x_api_base_url=args.x_api_base_url,
                 x_page_size=args.x_page_size,
                 x_max_pages=args.x_max_pages,
+            )
+            json_backup_path = _maybe_write_json_backup(
+                store,
+                batch,
+                enabled=args.json_backup,
+                backup_dir=args.json_backup_dir,
+                input_path=args.input,
             )
             import_summary = store.upsert_bookmarks(batch.bookmarks)
             _apply_xarchive_metadata(store, batch)
@@ -477,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Run complete: run_id={run_id}, imported={imported}{import_details}, classified={classified}, "
             f"exported={exported}, archive={args.archive_dir}"
+            f"{', json_backup=' + str(json_backup_path) if json_backup_path else ''}"
         )
         return 0
 
@@ -620,6 +644,21 @@ def _add_connector_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--x-api-base-url", default="https://api.x.com")
     parser.add_argument("--x-page-size", type=int, default=100)
     parser.add_argument("--x-max-pages", type=int, default=10)
+
+
+def _add_json_backup_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--json-backup",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a raw JSON backup for imported connector data.",
+    )
+    parser.add_argument(
+        "--json-backup-dir",
+        type=Path,
+        default=DEFAULT_JSON_BACKUP_DIR,
+        help=f"Directory for raw JSON backups. Default: {DEFAULT_JSON_BACKUP_DIR}",
+    )
 
 
 def _env(name: str, default: str) -> str:
@@ -836,6 +875,72 @@ def _sync_bookmarks(
     batch.metadata["cursor_before"] = cursor or ""
     batch.metadata["cursor_after"] = batch.next_cursor or ""
     return batch
+
+
+def _maybe_write_json_backup(
+    store: BookmarkStore,
+    batch: SyncBatch,
+    *,
+    enabled: bool,
+    backup_dir: Path,
+    input_path: Path | None,
+) -> Path | None:
+    if not enabled:
+        return None
+    path = _write_json_backup(batch, backup_dir=backup_dir, input_path=input_path)
+    connector = batch.metadata.get("connector", "unknown")
+    store.set_sync_state(f"{connector}.json_backup_path", str(path))
+    return path
+
+
+def _write_json_backup(
+    batch: SyncBatch,
+    *,
+    backup_dir: Path,
+    input_path: Path | None,
+) -> Path:
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    connector = _safe_filename_part(batch.metadata.get("connector") or "unknown")
+    source = input_path or _metadata_source_path(batch)
+    source_stem = _safe_filename_part(source.stem if source is not None else "batch")
+    filename = f"{time.strftime('%Y%m%d-%H%M%S')}-{connector}-{source_stem}.json"
+    destination = _unique_path(backup_dir / filename)
+
+    if source is not None and source.exists():
+        shutil.copyfile(source, destination)
+        return destination
+
+    records = [bookmark.raw or {} for bookmark in batch.bookmarks]
+    destination.write_text(
+        json.dumps(records, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return destination
+
+
+def _metadata_source_path(batch: SyncBatch) -> Path | None:
+    value = batch.metadata.get("source_path")
+    if not value:
+        return None
+    return Path(value)
+
+
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Unable to choose a unique JSON backup path under {path.parent}")
+
+
+def _safe_filename_part(value: str) -> str:
+    cleaned = "".join(
+        character if character.isalnum() or character in ("-", "_") else "-"
+        for character in value.strip()
+    ).strip("-")
+    return cleaned or "unknown"
 
 
 def _apply_xarchive_metadata(store: BookmarkStore, batch: SyncBatch) -> int:
