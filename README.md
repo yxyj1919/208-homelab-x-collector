@@ -141,6 +141,14 @@ PYTHONPATH=src python3 -m xbookmarks.cli search "VMware lifecycle"
 PYTHONPATH=src python3 -m xbookmarks.cli search Kubernetes --limit 10
 ```
 
+查看 review queue 统计：
+
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli --db data/bookmarks.sqlite review-summary
+```
+
+输出包含总数、pending/accepted 数量，以及 pending review 按 `review_reason` 的分组计数。
+
 更新单条收藏的备注、标签和状态：
 
 ```bash
@@ -171,7 +179,8 @@ PYTHONPATH=src python3 -m xbookmarks.cli web --host 127.0.0.1 --port 8765
 - 按 `active`、`unread`、`read`、`important`、`pending_review`、`archived` 过滤。
 - 修改分类、标签、备注。
 - 标记 read/unread、important、archive。
-- 对 pending review 单条收藏执行 Accept。
+- 对 pending review 单条收藏执行 Accept 或临时 Skip。
+- 对 accepted 收藏执行 Mark pending，重新放回 review queue。
 - 查看最近同步状态。
 
 Review queue 当前是轻量状态层：新导入记录默认进入 `pending`，低置信度自动分类会保持

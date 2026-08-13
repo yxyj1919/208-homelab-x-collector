@@ -52,6 +52,9 @@ class BookmarkService:
             "statuses": self.store.status_counts(),
         }
 
+    def review_summary(self) -> dict[str, Any]:
+        return self.store.review_summary()
+
     def sync_status(self, *, latest_limit: int = 5) -> dict[str, Any]:
         if latest_limit < 1:
             raise ValueError("latest_limit must be at least 1")

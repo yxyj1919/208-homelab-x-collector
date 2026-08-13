@@ -193,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     stats_parser = subparsers.add_parser("stats")
     stats_parser.add_argument("--by-category", action="store_true")
 
+    subparsers.add_parser("review-summary")
+
     subparsers.add_parser("sync-status")
 
     run_log_parser = subparsers.add_parser("run-log")
@@ -500,6 +502,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"pages={run['pages_fetched']} has_more={bool(run['has_more'])} "
                 f"started_at={run['started_at']} ended_at={run['ended_at']}"
             )
+        return 0
+
+    if args.command == "review-summary":
+        summary = BookmarkService(store).review_summary()
+        print(
+            f"total={summary['total']} pending={summary['pending']} "
+            f"accepted={summary['accepted']}"
+        )
+        by_reason = summary.get("by_reason") or {}
+        if by_reason:
+            for reason, count in sorted(by_reason.items()):
+                print(f"{reason}\t{count}")
         return 0
 
     if args.command == "run-log":

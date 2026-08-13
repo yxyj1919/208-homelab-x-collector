@@ -38,6 +38,9 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/categories":
             self._handle_categories()
             return
+        if parsed.path == "/api/review-summary":
+            self._handle_review_summary()
+            return
         if parsed.path == "/api/sync-status":
             self._handle_sync_status()
             return
@@ -91,6 +94,9 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
 
     def _handle_categories(self) -> None:
         self._send_json(self.bookmark_service.category_summary())
+
+    def _handle_review_summary(self) -> None:
+        self._send_json(self.bookmark_service.review_summary())
 
     def _handle_sync_status(self) -> None:
         self._send_json(self.bookmark_service.sync_status(latest_limit=5))
@@ -240,6 +246,7 @@ INDEX_HTML = r"""<!doctype html>
       <button id="refresh" type="button">Refresh</button>
     </div>
     <div id="sync" class="status"></div>
+    <div id="review-summary" class="status"></div>
   </header>
   <main>
     <section>
@@ -264,16 +271,18 @@ INDEX_HTML = r"""<!doctype html>
         <div class="actions">
           <button id="save" class="primary" type="button">Save</button>
           <button id="accept-review" type="button">Accept</button>
+          <button id="skip-review" type="button">Skip</button>
+          <button id="mark-pending" type="button">Mark pending</button>
           <button id="open" type="button">Open</button>
         </div>
       </div>
     </aside>
   </main>
   <script>
-    const state = { items: [], selected: null };
+    const state = { items: [], selected: null, skippedReviewIds: new Set() };
     const $ = (id) => document.getElementById(id);
     const query = $("query"), category = $("category"), status = $("status");
-    const list = $("list"), sync = $("sync");
+    const list = $("list"), sync = $("sync"), reviewSummary = $("review-summary");
 
     async function api(path, options) {
       const response = await fetch(path, options);
@@ -306,13 +315,19 @@ INDEX_HTML = r"""<!doctype html>
       sync.textContent = `Last sync: ${summary.status} · ${summary.connector || "unknown"} · source ${summary.source_count} · inserted ${summary.inserted} · updated ${summary.updated} · unchanged ${summary.unchanged} · classified ${summary.classified} · exported ${summary.exported} · pages ${summary.pages_fetched}${more} · ${summary.finished_at || ""}`;
     }
 
+    async function loadReviewSummary() {
+      const body = await api("/api/review-summary");
+      const reasons = body.by_reason || {};
+      reviewSummary.textContent = `Pending review: ${body.pending || 0} · low-confidence: ${reasons["low-confidence"] || 0} · content-changed: ${reasons["content-changed"] || 0}`;
+    }
+
     async function loadItems() {
       const params = new URLSearchParams({ limit: "100" });
       if (query.value.trim()) params.set("query", query.value.trim());
       if (category.value) params.set("category", category.value);
       if (status.value) params.set("status", status.value);
       const body = await api(`/api/bookmarks?${params}`);
-      state.items = body.items;
+      state.items = body.items.filter(item => !state.skippedReviewIds.has(item.tweet_id));
       renderList();
     }
 
@@ -360,6 +375,8 @@ INDEX_HTML = r"""<!doctype html>
       $("edit-important").checked = item.important;
       $("edit-archived").checked = item.archived;
       $("accept-review").disabled = item.review_state !== "pending";
+      $("skip-review").disabled = item.review_state !== "pending";
+      $("mark-pending").disabled = item.review_state === "pending";
     }
 
     function authorLabel(item) {
@@ -468,7 +485,7 @@ INDEX_HTML = r"""<!doctype html>
           body: JSON.stringify(payload)
         });
         state.selected = body.item;
-        await Promise.all([loadCategories(), loadItems()]);
+        await Promise.all([loadCategories(), loadReviewSummary(), loadItems()]);
         sync.textContent = `Saved ${state.selected.tweet_id}`;
       } catch (error) {
         sync.textContent = `Save failed: ${error.message}`;
@@ -486,11 +503,42 @@ INDEX_HTML = r"""<!doctype html>
           body: JSON.stringify({ review_state: "accepted" })
         });
         state.selected = body.item;
-        await Promise.all([loadCategories(), loadItems()]);
+        await Promise.all([loadCategories(), loadReviewSummary(), loadItems()]);
         sync.textContent = `Accepted ${acceptedId}`;
       } catch (error) {
         sync.textContent = `Accept failed: ${error.message}`;
       }
+    }
+
+    async function markPendingSelected() {
+      if (!state.selected) return;
+      const pendingId = state.selected.tweet_id;
+      sync.textContent = "Marking pending...";
+      try {
+        const body = await api(`/api/bookmarks/${encodeURIComponent(pendingId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ review_state: "pending" })
+        });
+        state.selected = body.item;
+        await Promise.all([loadCategories(), loadReviewSummary(), loadItems()]);
+        sync.textContent = `Marked pending ${pendingId}`;
+      } catch (error) {
+        sync.textContent = `Mark pending failed: ${error.message}`;
+      }
+    }
+
+    function skipSelected() {
+      if (!state.selected || state.selected.review_state !== "pending") return;
+      const skippedId = state.selected.tweet_id;
+      state.skippedReviewIds.add(skippedId);
+      state.items = state.items.filter(item => item.tweet_id !== skippedId);
+      renderList();
+      sync.textContent = `Skipped ${skippedId}`;
+    }
+
+    function resetSkippedReviewIds() {
+      state.skippedReviewIds.clear();
     }
 
     function escapeHtml(value) {
@@ -502,15 +550,17 @@ INDEX_HTML = r"""<!doctype html>
       return text.length > max ? text.slice(0, max - 1) + "..." : text;
     }
 
-    query.addEventListener("input", debounce(loadItems, 250));
-    category.addEventListener("change", loadItems);
-    status.addEventListener("change", loadItems);
-    $("refresh").addEventListener("click", () => Promise.all([loadCategories(), loadSyncStatus(), loadItems()]));
+    query.addEventListener("input", debounce(() => { resetSkippedReviewIds(); loadItems(); }, 250));
+    category.addEventListener("change", () => { resetSkippedReviewIds(); loadItems(); });
+    status.addEventListener("change", () => { resetSkippedReviewIds(); loadItems(); });
+    $("refresh").addEventListener("click", () => { resetSkippedReviewIds(); return Promise.all([loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]); });
     $("save").addEventListener("click", saveSelected);
     $("accept-review").addEventListener("click", acceptSelected);
+    $("skip-review").addEventListener("click", skipSelected);
+    $("mark-pending").addEventListener("click", markPendingSelected);
     $("open").addEventListener("click", () => { if (state.selected) window.open(state.selected.url, "_blank", "noopener"); });
 
-    Promise.all([loadCategories(), loadSyncStatus(), loadItems()]).catch(error => {
+    Promise.all([loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]).catch(error => {
       sync.textContent = error.message;
     });
   </script>

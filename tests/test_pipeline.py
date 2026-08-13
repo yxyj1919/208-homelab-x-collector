@@ -838,6 +838,69 @@ class PipelineTest(unittest.TestCase):
         self.assertIsNotNone(accepted["reviewed_at"])
         self.assertEqual(after_accept, [])
 
+    def test_review_summary_counts_pending_reasons(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/example/status/9001",
+                        text="New note",
+                    ),
+                    Bookmark(
+                        tweet_id="9002",
+                        url="https://x.com/example/status/9002",
+                        text="General note",
+                    ),
+                    Bookmark(
+                        tweet_id="9003",
+                        url="https://x.com/example/status/9003",
+                        text="Accepted note",
+                    ),
+                ]
+            )
+            store.save_classification(
+                "9002",
+                ClassificationResult(
+                    category="General",
+                    tags=[],
+                    confidence=0.2,
+                    reason="No category keyword matched.",
+                ),
+                provider="rules",
+            )
+            store.update_bookmark("9003", review_state="accepted")
+
+            summary = BookmarkService(store).review_summary()
+
+        self.assertEqual(summary["total"], 3)
+        self.assertEqual(summary["pending"], 2)
+        self.assertEqual(summary["accepted"], 1)
+        self.assertEqual(summary["by_reason"], {"low-confidence": 1, "new-import": 1})
+
+    def test_review_summary_command_prints_reason_counts(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "bookmarks.sqlite"
+            store = BookmarkStore(db)
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="9001",
+                        url="https://x.com/example/status/9001",
+                        text="New note",
+                    )
+                ]
+            )
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["--db", str(db), "review-summary"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("total=1 pending=1 accepted=0", output.getvalue())
+        self.assertIn("new-import\t1", output.getvalue())
+
     def test_bookmark_service_normalizes_payloads_and_filters(self) -> None:
         with TemporaryDirectory() as temp_dir:
             store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
@@ -867,11 +930,14 @@ class PipelineTest(unittest.TestCase):
             accepted_body = service.update_bookmark(
                 "9001", {"review_state": "accepted"}
             )
+            pending_body = service.update_bookmark("9001", {"review_state": "pending"})
             list_body = service.list_bookmarks(category="VCF", status="important")
 
         self.assertEqual(patch_body["item"]["category"], "VCF")
         self.assertEqual(patch_body["item"]["tags"], ["vmware", "homelab"])
         self.assertEqual(accepted_body["item"]["review_state"], "accepted")
+        self.assertEqual(pending_body["item"]["review_state"], "pending")
+        self.assertEqual(pending_body["item"]["review_reason"], "manual-pending")
         self.assertEqual(list_body["items"][0]["tweet_id"], "9001")
 
     def test_bookmark_service_rejects_invalid_api_inputs(self) -> None:
@@ -1139,6 +1205,7 @@ class PipelineTest(unittest.TestCase):
                 pending_body = _read_json_url(
                     f"{base_url}/api/bookmarks?status=pending_review"
                 )
+                review_summary = _read_json_url(f"{base_url}/api/review-summary")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -1151,14 +1218,25 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(filtered_body["items"][0]["tweet_id"], "9001")
         self.assertEqual(accept_body["item"]["review_state"], "accepted")
         self.assertEqual(pending_body["items"], [])
+        self.assertEqual(review_summary["pending"], 0)
+        self.assertEqual(review_summary["accepted"], 1)
 
     def test_web_ui_exposes_review_queue_details(self) -> None:
         self.assertIn("Pending review", INDEX_HTML)
+        self.assertIn("review-summary", INDEX_HTML)
+        self.assertIn("loadReviewSummary", INDEX_HTML)
+        self.assertIn("low-confidence", INDEX_HTML)
+        self.assertIn("content-changed", INDEX_HTML)
         self.assertIn("review-detail", INDEX_HTML)
         self.assertIn("reviewReasonLabel", INDEX_HTML)
         self.assertIn("formatConfidence", INDEX_HTML)
         self.assertIn("Provider", INDEX_HTML)
         self.assertIn("acceptedId", INDEX_HTML)
+        self.assertIn("skip-review", INDEX_HTML)
+        self.assertIn("mark-pending", INDEX_HTML)
+        self.assertIn("skippedReviewIds", INDEX_HTML)
+        self.assertIn("skipSelected", INDEX_HTML)
+        self.assertIn("markPendingSelected", INDEX_HTML)
 
     def test_web_api_imports_extension_bookmarks(self) -> None:
         with TemporaryDirectory() as temp_dir:

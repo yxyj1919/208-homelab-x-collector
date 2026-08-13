@@ -1051,6 +1051,35 @@ class BookmarkStore:
             "exported": exported,
         }
 
+    def review_summary(self) -> dict[str, object]:
+        self.init()
+        with self.connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0]
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM bookmarks WHERE review_state = 'pending'"
+            ).fetchone()[0]
+            accepted = conn.execute(
+                "SELECT COUNT(*) FROM bookmarks WHERE review_state = 'accepted'"
+            ).fetchone()[0]
+            reason_rows = conn.execute(
+                """
+                SELECT COALESCE(review_reason, 'unspecified') AS reason,
+                       COUNT(*) AS count
+                FROM bookmarks
+                WHERE review_state = 'pending'
+                GROUP BY COALESCE(review_reason, 'unspecified')
+                ORDER BY count DESC, reason
+                """
+            ).fetchall()
+        return {
+            "total": int(total),
+            "pending": int(pending),
+            "accepted": int(accepted),
+            "by_reason": {
+                str(row["reason"]): int(row["count"]) for row in reason_rows
+            },
+        }
+
     def category_counts(self) -> list[tuple[str, int]]:
         self.init()
         with self.connect() as conn:
