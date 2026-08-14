@@ -44,6 +44,9 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/sync-status":
             self._handle_sync_status()
             return
+        if parsed.path == "/api/settings":
+            self._handle_settings()
+            return
         self._send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_HEAD(self) -> None:
@@ -65,6 +68,13 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
             return
         self._send_error(HTTPStatus.NOT_FOUND, "Not found")
 
+    def do_PUT(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/settings":
+            self._handle_update_settings()
+            return
+        self._send_error(HTTPStatus.NOT_FOUND, "Not found")
+
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/bookmarks/bulk":
@@ -72,6 +82,9 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/classify":
             self._handle_classify()
+            return
+        if parsed.path == "/api/settings/ollama-models":
+            self._handle_ollama_models()
             return
         if parsed.path == "/api/extension/bookmarks":
             self._handle_extension_bookmarks()
@@ -107,6 +120,21 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
     def _handle_sync_status(self) -> None:
         self._send_json(self.bookmark_service.sync_status(latest_limit=5))
 
+    def _handle_settings(self) -> None:
+        try:
+            self._send_json(self.bookmark_service.settings())
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+
+    def _handle_update_settings(self) -> None:
+        try:
+            payload = self._read_json()
+            response = self.bookmark_service.update_settings(payload)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        self._send_json(response)
+
     def _handle_update_bookmark(self, tweet_id: str) -> None:
         try:
             payload = self._read_json()
@@ -133,6 +161,15 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             response = self.bookmark_service.classify_bookmarks(payload)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        self._send_json(response)
+
+    def _handle_ollama_models(self) -> None:
+        try:
+            payload = self._read_json()
+            response = self.bookmark_service.ollama_models(payload)
+        except (RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         self._send_json(response)
@@ -206,40 +243,59 @@ INDEX_HTML = r"""<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>X Bookmarks</title>
   <style>
-    :root { color-scheme: light; --bg: #f7f8fa; --panel: #ffffff; --text: #1f2933; --muted: #667085; --line: #d8dee8; --accent: #0f766e; --danger: #b42318; }
+    :root { color-scheme: light; --bg: #f4f6f8; --panel: #ffffff; --panel-soft: #f8fafc; --text: #182230; --muted: #667085; --line: #d6dce6; --accent: #0f766e; --accent-soft: #e6f4f1; --warning: #b54708; --warning-soft: #fff4e5; --danger: #b42318; --danger-soft: #fee4e2; }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
-    header { padding: 18px 24px 12px; border-bottom: 1px solid var(--line); background: #fff; position: sticky; top: 0; z-index: 5; }
-    h1 { margin: 0 0 12px; font-size: 22px; font-weight: 650; letter-spacing: 0; }
-    .toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 180px 160px auto; gap: 10px; align-items: center; }
-    .ai-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+    header { padding: 16px 24px 14px; border-bottom: 1px solid var(--line); background: rgba(255, 255, 255, 0.96); position: sticky; top: 0; z-index: 5; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04); }
+    h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: 0; }
+    .header-top { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 12px; }
+    .toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) 180px 170px auto; gap: 10px; align-items: center; }
+    .ai-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     input, select, textarea, button { font: inherit; }
     input, select, textarea { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px; background: #fff; color: var(--text); }
     button { border: 1px solid var(--line); border-radius: 6px; padding: 9px 12px; background: #fff; color: var(--text); cursor: pointer; }
+    button:hover { border-color: #98a2b3; }
+    button:disabled { color: #98a2b3; cursor: not-allowed; background: #f2f4f7; }
     button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
     button.danger { color: var(--danger); }
-    main { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; padding: 16px 24px; }
+    .dashboard { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .metric { border: 1px solid var(--line); border-radius: 8px; background: var(--panel-soft); padding: 9px 10px; min-width: 0; }
+    .metric-label { color: var(--muted); font-size: 12px; line-height: 1.2; }
+    .metric-value { margin-top: 4px; font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 18px; padding: 18px 24px; }
     .status { color: var(--muted); font-size: 13px; margin-top: 10px; min-height: 18px; }
-    .list { display: grid; gap: 8px; align-content: start; }
-    .item { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px; cursor: pointer; }
-    .item[aria-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
-    .item-head { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; }
-    .item-head input { width: auto; margin-top: 2px; }
+    .list { display: grid; gap: 10px; align-content: start; }
+    .item { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 13px; cursor: pointer; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04); }
+    .item:hover { border-color: #b7c0cd; }
+    .item[aria-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset, 0 1px 2px rgba(16, 24, 40, 0.04); }
+    .item-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: start; }
+    .item-head input { width: auto; margin-top: 3px; }
+    .item-title { min-width: 0; }
+    .item-author { font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item-date { color: var(--muted); font-size: 12px; line-height: 1.35; margin-top: 1px; }
+    .item-open { color: var(--accent); font-size: 12px; text-decoration: none; white-space: nowrap; margin-top: 2px; }
     .meta, .tags, .sync { color: var(--muted); font-size: 13px; line-height: 1.4; }
-    .text { white-space: pre-wrap; margin: 8px 0; line-height: 1.45; }
+    .text { white-space: pre-wrap; margin: 10px 0 8px; line-height: 1.5; }
     .note { color: #344054; background: #f2f4f7; border-left: 3px solid var(--accent); margin-top: 8px; padding: 7px 9px; font-size: 13px; line-height: 1.4; }
-    .tag { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; margin: 4px 4px 0 0; background: #f9fafb; }
-    .badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
-    .badge { border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: #fff; font-size: 12px; padding: 1px 6px; }
-    .item-media { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 150px)); gap: 8px; margin-top: 8px; }
+    .tag { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; margin: 4px 4px 0 0; background: #fff; color: #475467; }
+    .badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+    .badge { border: 1px solid var(--line); border-radius: 999px; color: #475467; background: #fff; font-size: 12px; padding: 2px 7px; }
+    .badge.category { background: var(--accent-soft); border-color: #99d5cc; color: #0f766e; }
+    .badge.pending { background: var(--warning-soft); border-color: #f7c78b; color: var(--warning); }
+    .badge.important { background: var(--danger-soft); border-color: #fda29b; color: var(--danger); }
+    .badge.archived, .badge.read { background: #f2f4f7; }
+    .item-media { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 150px)); gap: 8px; margin-top: 10px; }
     .item-media img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
     .item-media a { display: inline-flex; align-items: center; min-height: 36px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; color: var(--accent); background: #fff; font-size: 13px; }
-    .review-panel { border: 1px solid var(--line); border-radius: 8px; background: #f9fafb; padding: 10px; margin-bottom: 12px; font-size: 13px; line-height: 1.45; }
+    .review-panel { border: 1px solid #f7c78b; border-radius: 8px; background: var(--warning-soft); padding: 10px; font-size: 13px; line-height: 1.45; }
     .review-panel strong { display: block; margin-bottom: 4px; }
-    aside { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px; align-self: start; position: sticky; top: 100px; }
-    aside h2 { margin: 0 0 12px; font-size: 17px; letter-spacing: 0; }
-    .rich { display: grid; gap: 10px; margin-bottom: 12px; }
-    .author-box, .link-card, .quote-box { border: 1px solid var(--line); border-radius: 8px; background: #f9fafb; padding: 10px; }
+    aside { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px; align-self: start; position: sticky; top: 116px; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04); }
+    aside h2 { margin: 0 0 12px; font-size: 16px; letter-spacing: 0; word-break: break-word; }
+    .editor-section { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+    .editor-section:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+    .section-title { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+    .rich { display: grid; gap: 10px; }
+    .author-box, .link-card, .quote-box { border: 1px solid var(--line); border-radius: 8px; background: var(--panel-soft); padding: 10px; }
     .author-box strong, .link-card strong, .quote-box strong { display: block; margin-bottom: 4px; }
     .media-grid { display: grid; gap: 8px; }
     .media-grid img { width: 100%; max-height: 280px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
@@ -248,8 +304,9 @@ INDEX_HTML = r"""<!doctype html>
     .checks { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
     .checks label { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: var(--text); }
     .checks input { width: auto; }
-    .actions { display: flex; gap: 8px; margin-top: 12px; }
-    .bulk-actions { display: grid; grid-template-columns: auto auto auto minmax(160px, 220px) auto; gap: 8px; align-items: center; margin-bottom: 10px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .bulk-actions { display: grid; grid-template-columns: auto auto auto minmax(160px, 220px) auto; gap: 8px; align-items: center; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 10px; }
+    .bulk-actions[data-active="false"] { display: none; }
     .bulk-actions span { color: var(--muted); font-size: 13px; }
     .empty { color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; padding: 24px; text-align: center; }
     dialog { border: 1px solid var(--line); border-radius: 8px; padding: 0; width: min(420px, calc(100vw - 32px)); color: var(--text); }
@@ -257,9 +314,19 @@ INDEX_HTML = r"""<!doctype html>
     .modal { padding: 18px; background: var(--panel); }
     .modal h2 { margin: 0 0 12px; font-size: 18px; letter-spacing: 0; }
     .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .settings-modal { width: min(900px, calc(100vw - 32px)); }
+    .settings-grid { display: grid; grid-template-columns: minmax(0, 1fr) 120px auto; gap: 10px; align-items: end; }
+    .settings-model-row { margin-top: 10px; }
+    .category-editor { display: grid; gap: 8px; margin-top: 8px; max-height: min(46vh, 520px); overflow: auto; padding-right: 2px; }
+    .category-row { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: start; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-soft); padding: 8px; }
+    .category-row button { padding: 8px 10px; }
+    .settings-status { color: var(--muted); font-size: 13px; min-height: 18px; margin-top: 10px; }
     @media (max-width: 860px) {
+      .header-top { align-items: flex-start; flex-direction: column; }
       .toolbar { grid-template-columns: 1fr; }
+      .dashboard { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .bulk-actions { grid-template-columns: 1fr; }
+      .settings-grid, .category-row { grid-template-columns: 1fr; }
       main { grid-template-columns: 1fr; padding: 12px; }
       header { padding: 14px 12px; }
       aside { position: static; }
@@ -268,7 +335,13 @@ INDEX_HTML = r"""<!doctype html>
 </head>
 <body>
   <header>
-    <h1>X Bookmarks</h1>
+    <div class="header-top">
+      <h1>X Bookmarks</h1>
+      <div class="ai-actions">
+        <button id="settings" type="button">Settings</button>
+        <button id="ai-classify" class="primary" type="button">AI classify</button>
+      </div>
+    </div>
     <div class="toolbar">
       <input id="query" type="search" placeholder="Search">
       <select id="category"></select>
@@ -283,15 +356,29 @@ INDEX_HTML = r"""<!doctype html>
       </select>
       <button id="refresh" type="button">Refresh</button>
     </div>
-    <div class="ai-actions">
-      <button id="ai-classify" class="primary" type="button">AI classify</button>
+    <div class="dashboard" id="sync-cards">
+      <div class="metric">
+        <div class="metric-label">Last sync</div>
+        <div class="metric-value" id="sync-last">No sync status</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Imported</div>
+        <div class="metric-value" id="sync-imported">0 source</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Classified</div>
+        <div class="metric-value" id="sync-classified">0</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Pending review</div>
+        <div class="metric-value" id="review-summary">0</div>
+      </div>
     </div>
     <div id="sync" class="status"></div>
-    <div id="review-summary" class="status"></div>
   </header>
   <main>
     <section>
-      <div class="bulk-actions">
+      <div class="bulk-actions" data-active="false">
         <span id="bulk-count">0 selected</span>
         <button id="bulk-accept" type="button">Accept</button>
         <button id="bulk-archive" type="button">Archive</button>
@@ -303,25 +390,37 @@ INDEX_HTML = r"""<!doctype html>
     <aside>
       <h2 id="editor-title">No item selected</h2>
       <div id="editor-body" hidden>
-        <div id="review-detail" class="review-panel"></div>
-        <div id="rich" class="rich"></div>
-        <label for="edit-category">Category</label>
-        <input id="edit-category" autocomplete="off">
-        <label for="edit-tags">Tags</label>
-        <input id="edit-tags" autocomplete="off">
-        <label for="edit-notes">Notes</label>
-        <textarea id="edit-notes" rows="5"></textarea>
-        <div class="checks">
-          <label><input id="edit-read" type="checkbox"> Read</label>
-          <label><input id="edit-important" type="checkbox"> Important</label>
-          <label><input id="edit-archived" type="checkbox"> Archived</label>
+        <div class="editor-section">
+          <div class="section-title">Preview</div>
+          <div id="rich" class="rich"></div>
         </div>
-        <div class="actions">
-          <button id="save" class="primary" type="button">Save</button>
-          <button id="accept-review" type="button">Accept</button>
-          <button id="skip-review" type="button">Skip</button>
-          <button id="mark-pending" type="button">Mark pending</button>
-          <button id="open" type="button">Open</button>
+        <div class="editor-section">
+          <div class="section-title">Classification</div>
+          <div id="review-detail" class="review-panel"></div>
+          <label for="edit-category">Category</label>
+          <input id="edit-category" autocomplete="off">
+          <label for="edit-tags">Tags</label>
+          <input id="edit-tags" autocomplete="off">
+        </div>
+        <div class="editor-section">
+          <div class="section-title">Notes & State</div>
+          <label for="edit-notes">Notes</label>
+          <textarea id="edit-notes" rows="5"></textarea>
+          <div class="checks">
+            <label><input id="edit-read" type="checkbox"> Read</label>
+            <label><input id="edit-important" type="checkbox"> Important</label>
+            <label><input id="edit-archived" type="checkbox"> Archived</label>
+          </div>
+        </div>
+        <div class="editor-section">
+          <div class="section-title">Actions</div>
+          <div class="actions">
+            <button id="save" class="primary" type="button">Save</button>
+            <button id="accept-review" type="button">Accept</button>
+            <button id="skip-review" type="button">Skip</button>
+            <button id="mark-pending" type="button">Mark pending</button>
+            <button id="open" type="button">Open</button>
+          </div>
         </div>
       </div>
     </aside>
@@ -339,8 +438,38 @@ INDEX_HTML = r"""<!doctype html>
       </div>
     </form>
   </dialog>
+  <dialog id="settings-dialog" class="settings-modal">
+    <form method="dialog" class="modal">
+      <h2>Settings</h2>
+      <div class="section-title">Ollama</div>
+      <div class="settings-grid">
+        <div>
+          <label for="settings-ollama-url">Address and port</label>
+          <input id="settings-ollama-url" autocomplete="off" placeholder="http://127.0.0.1:11434">
+        </div>
+        <div>
+          <label for="settings-ollama-timeout">AI classify timeout</label>
+          <input id="settings-ollama-timeout" type="number" min="1" max="1800" step="1">
+        </div>
+        <button id="settings-find-models" type="button">Find models</button>
+      </div>
+      <div id="settings-model-status" class="settings-status"></div>
+      <div class="settings-model-row">
+        <label for="settings-ollama-model">Available model</label>
+        <select id="settings-ollama-model"></select>
+      </div>
+      <div class="section-title" style="margin-top:16px;">Categories</div>
+      <div id="settings-categories" class="category-editor"></div>
+      <button id="settings-add-category" type="button">Add category</button>
+      <div id="settings-status" class="settings-status"></div>
+      <div class="modal-actions">
+        <button id="settings-cancel" type="button">Cancel</button>
+        <button id="settings-save" class="primary" type="button">Save settings</button>
+      </div>
+    </form>
+  </dialog>
   <script>
-    const state = { items: [], selected: null, selectedIds: new Set(), skippedReviewIds: new Set(), aiTimer: null };
+    const state = { items: [], selected: null, selectedIds: new Set(), skippedReviewIds: new Set(), aiTimer: null, settings: null };
     const $ = (id) => document.getElementById(id);
     const query = $("query"), category = $("category"), status = $("status");
     const list = $("list"), sync = $("sync"), reviewSummary = $("review-summary");
@@ -366,6 +495,138 @@ INDEX_HTML = r"""<!doctype html>
       renderAiCategoryOptions(body.categories);
     }
 
+    async function loadSettings() {
+      state.settings = await api("/api/settings");
+      renderSettingsForm();
+    }
+
+    function renderSettingsForm() {
+      const settings = state.settings || { ollama: {}, categories: [] };
+      $("settings-ollama-url").value = settings.ollama.url || "http://127.0.0.1:11434";
+      $("settings-ollama-timeout").value = settings.ollama.timeout || 180;
+      renderOllamaModelOptions(settings.ollama.models || [], settings.ollama.model || "qwen2.5:7b");
+      renderSettingsCategories(settings.categories || []);
+    }
+
+    function renderOllamaModelOptions(models, selected) {
+      const values = [];
+      const seen = new Set();
+      for (const value of [selected, ...(models || [])]) {
+        const model = String(value || "").trim();
+        if (!model || seen.has(model)) continue;
+        values.push(model);
+        seen.add(model);
+      }
+      $("settings-ollama-model").innerHTML = values.map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("");
+      if (selected && seen.has(selected)) $("settings-ollama-model").value = selected;
+    }
+
+    function renderSettingsCategories(categories) {
+      $("settings-categories").innerHTML = categories.map((category, index) => `
+        <div class="category-row" data-index="${index}">
+          <input class="settings-category-name" autocomplete="off" placeholder="Name" value="${escapeHtml(category.name || "")}">
+          <input class="settings-category-description" autocomplete="off" placeholder="Description" value="${escapeHtml(category.description || "")}">
+          <input class="settings-category-keywords" autocomplete="off" placeholder="keyword, keyword" value="${escapeHtml((category.keywords || []).join(", "))}">
+          <button class="settings-delete-category danger" type="button">Delete</button>
+        </div>
+      `).join("");
+      for (const node of $("settings-categories").querySelectorAll(".settings-delete-category")) {
+        node.addEventListener("click", () => {
+          const row = node.closest(".category-row");
+          row.remove();
+        });
+      }
+    }
+
+    function openSettingsDialog() {
+      $("settings-status").textContent = "";
+      if (state.settings) renderSettingsForm();
+      $("settings-dialog").showModal();
+    }
+
+    function closeSettingsDialog() {
+      $("settings-dialog").close();
+    }
+
+    function addSettingsCategory() {
+      const row = document.createElement("div");
+      row.className = "category-row";
+      row.innerHTML = `
+        <input class="settings-category-name" autocomplete="off" placeholder="Name">
+        <input class="settings-category-description" autocomplete="off" placeholder="Description">
+        <input class="settings-category-keywords" autocomplete="off" placeholder="keyword, keyword">
+        <button class="settings-delete-category danger" type="button">Delete</button>
+      `;
+      row.querySelector(".settings-delete-category").addEventListener("click", () => row.remove());
+      $("settings-categories").appendChild(row);
+      row.querySelector(".settings-category-name").focus();
+    }
+
+    function collectSettingsPayload() {
+      const categories = Array.from($("settings-categories").querySelectorAll(".category-row")).map(row => ({
+        name: row.querySelector(".settings-category-name").value.trim(),
+        description: row.querySelector(".settings-category-description").value.trim(),
+        keywords: row.querySelector(".settings-category-keywords").value.split(",").map(value => value.trim()).filter(Boolean)
+      })).filter(category => category.name);
+      return {
+        ollama: {
+          url: $("settings-ollama-url").value.trim() || "http://127.0.0.1:11434",
+          model: $("settings-ollama-model").value.trim() || "qwen2.5:7b",
+          timeout: Number($("settings-ollama-timeout").value || 180)
+        },
+        categories
+      };
+    }
+
+    function collectOllamaPayload() {
+      return {
+        ollama: {
+          url: $("settings-ollama-url").value.trim() || "http://127.0.0.1:11434",
+          model: $("settings-ollama-model").value.trim() || "qwen2.5:7b"
+        }
+      };
+    }
+
+    async function findOllamaModels() {
+      $("settings-model-status").textContent = "Finding models...";
+      $("settings-find-models").disabled = true;
+      try {
+        const body = await api("/api/settings/ollama-models", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(collectOllamaPayload())
+        });
+        renderOllamaModelOptions(body.models || [], body.selected || (body.models && body.models[0]) || "");
+        $("settings-model-status").textContent = body.models && body.models.length
+          ? `Found ${body.models.length} model(s) · discovery timeout ${body.ollama.timeout}s`
+          : "No models returned";
+      } catch (error) {
+        $("settings-model-status").textContent = `Find models failed: ${error.message}`;
+      } finally {
+        $("settings-find-models").disabled = false;
+      }
+    }
+
+    async function saveSettings() {
+      $("settings-status").textContent = "Saving settings...";
+      $("settings-save").disabled = true;
+      try {
+        state.settings = await api("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(collectSettingsPayload())
+        });
+        renderSettingsForm();
+        await Promise.all([loadCategories(), loadItems()]);
+        $("settings-status").textContent = "Settings saved";
+        sync.textContent = "Settings saved";
+      } catch (error) {
+        $("settings-status").textContent = `Save failed: ${error.message}`;
+      } finally {
+        $("settings-save").disabled = false;
+      }
+    }
+
     function renderAiCategoryOptions(categories) {
       const current = $("ai-category").value || category.value;
       $("ai-category").innerHTML = '<option value="">Unclassified only</option>' +
@@ -377,17 +638,23 @@ INDEX_HTML = r"""<!doctype html>
       const body = await api("/api/sync-status");
       const summary = body.summary;
       if (!summary) {
-        sync.textContent = "No sync status";
+        $("sync-last").textContent = "No sync status";
+        $("sync-imported").textContent = "0 source";
+        $("sync-classified").textContent = "0";
+        sync.textContent = "";
         return;
       }
       const more = summary.has_more ? " · more pages available" : "";
-      sync.textContent = `Last sync: ${summary.status} · ${summary.connector || "unknown"} · source ${summary.source_count} · inserted ${summary.inserted} · updated ${summary.updated} · unchanged ${summary.unchanged} · classified ${summary.classified} · exported ${summary.exported} · pages ${summary.pages_fetched}${more} · ${summary.finished_at || ""}`;
+      $("sync-last").textContent = `${summary.status} · ${summary.finished_at || "unfinished"}`;
+      $("sync-imported").textContent = `${summary.source_count} source · ${summary.inserted} new · ${summary.updated} updated`;
+      $("sync-classified").textContent = `${summary.classified} · exported ${summary.exported}`;
+      sync.textContent = `${summary.connector || "unknown"} · unchanged ${summary.unchanged} · pages ${summary.pages_fetched}${more}`;
     }
 
     async function loadReviewSummary() {
       const body = await api("/api/review-summary");
       const reasons = body.by_reason || {};
-      reviewSummary.textContent = `Pending review: ${body.pending || 0} · low-confidence: ${reasons["low-confidence"] || 0} · content-changed: ${reasons["content-changed"] || 0}`;
+      reviewSummary.textContent = `${body.pending || 0} · low-confidence ${reasons["low-confidence"] || 0} · changed ${reasons["content-changed"] || 0}`;
     }
 
     async function loadItems() {
@@ -412,11 +679,16 @@ INDEX_HTML = r"""<!doctype html>
         <article class="item" data-id="${escapeHtml(item.tweet_id)}" aria-selected="${state.selected && state.selected.tweet_id === item.tweet_id}">
           <div class="item-head">
             <input class="bulk-check" type="checkbox" data-id="${escapeHtml(item.tweet_id)}" aria-label="Select ${escapeHtml(item.tweet_id)}" ${state.selectedIds.has(item.tweet_id) ? "checked" : ""}>
-            <div class="meta">${escapeHtml(item.category)} · ${escapeHtml(authorLabel(item))} · ${escapeHtml(item.created_at || "Unknown date")} · ${escapeHtml(item.read_state)}${item.important ? " · important" : ""}${item.review_state === "pending" ? " · pending review" : ""}${item.archived ? " · archived" : ""}</div>
+            <div class="item-title">
+              <div class="item-author">${escapeHtml(authorLabel(item))}</div>
+              <div class="item-date">${escapeHtml(item.created_at || "Unknown date")} · ${escapeHtml(item.tweet_id)}</div>
+            </div>
+            <a class="item-open" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Open</a>
           </div>
           <div class="text">${escapeHtml(trimText(item.text, 260))}</div>
           ${item.review_state === "pending" ? `<div class="note">Review: ${escapeHtml(reviewReasonLabel(item.review_reason))}${item.confidence != null ? ` · confidence ${escapeHtml(formatConfidence(item.confidence))}` : ""}</div>` : ""}
           ${item.notes ? `<div class="note">Note: ${escapeHtml(trimText(item.notes, 180))}</div>` : ""}
+          ${statusBadgesHtml(item)}
           ${mediaPreviewHtml(item)}
           ${badgesHtml(item)}
           <div class="tags">${item.tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
@@ -428,6 +700,9 @@ INDEX_HTML = r"""<!doctype html>
       for (const node of list.querySelectorAll(".bulk-check")) {
         node.addEventListener("click", event => event.stopPropagation());
         node.addEventListener("change", () => toggleBulkSelection(node.dataset.id, node.checked));
+      }
+      for (const node of list.querySelectorAll(".item-open")) {
+        node.addEventListener("click", event => event.stopPropagation());
       }
       if (state.selected) {
         const fresh = state.items.find(item => item.tweet_id === state.selected.tweet_id);
@@ -476,6 +751,7 @@ INDEX_HTML = r"""<!doctype html>
     function renderBulkState() {
       const count = state.selectedIds.size;
       $("bulk-count").textContent = `${count} selected`;
+      document.querySelector(".bulk-actions").dataset.active = String(count > 0);
       $("bulk-accept").disabled = count === 0;
       $("bulk-archive").disabled = count === 0;
       $("bulk-category-apply").disabled = count === 0;
@@ -496,6 +772,17 @@ INDEX_HTML = r"""<!doctype html>
       if (item.quoted_tweet) badges.push("quote");
       if (!badges.length) return "";
       return `<div class="badges">${badges.map(value => `<span class="badge">${escapeHtml(value)}</span>`).join("")}</div>`;
+    }
+
+    function statusBadgesHtml(item) {
+      const badges = [
+        ["category", item.category || "General"],
+        [item.read_state === "read" ? "read" : "", item.read_state || "unread"]
+      ];
+      if (item.important) badges.push(["important", "important"]);
+      if (item.review_state === "pending") badges.push(["pending", "pending review"]);
+      if (item.archived) badges.push(["archived", "archived"]);
+      return `<div class="badges">${badges.map(([kind, value]) => `<span class="badge ${escapeHtml(kind)}">${escapeHtml(value)}</span>`).join("")}</div>`;
     }
 
     function mediaPreviewHtml(item) {
@@ -537,7 +824,7 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     function richHtml(item) {
-      return [authorHtml(item), mediaHtml(item), cardHtml(item), quoteHtml(item)].filter(Boolean).join("");
+      return [authorHtml(item), mediaHtml(item), cardHtml(item), quoteHtml(item)].filter(Boolean).join("") || '<div class="empty">No preview</div>';
     }
 
     function authorHtml(item) {
@@ -699,7 +986,10 @@ INDEX_HTML = r"""<!doctype html>
             category: targetCategory || null,
             limit: limitValue,
             reclassify: Boolean(targetCategory),
-            export_html: true
+            export_html: true,
+            ollama_url: state.settings && state.settings.ollama ? state.settings.ollama.url : undefined,
+            ollama_model: state.settings && state.settings.ollama ? state.settings.ollama.model : undefined,
+            ollama_timeout: state.settings && state.settings.ollama ? state.settings.ollama.timeout : undefined
           })
         });
         stopAiProgress();
@@ -766,12 +1056,17 @@ INDEX_HTML = r"""<!doctype html>
     $("bulk-accept").addEventListener("click", () => bulkUpdateSelected("accept"));
     $("bulk-archive").addEventListener("click", () => bulkUpdateSelected("archive"));
     $("bulk-category-apply").addEventListener("click", () => bulkUpdateSelected("category"));
+    $("settings").addEventListener("click", openSettingsDialog);
+    $("settings-cancel").addEventListener("click", closeSettingsDialog);
+    $("settings-add-category").addEventListener("click", addSettingsCategory);
+    $("settings-find-models").addEventListener("click", findOllamaModels);
+    $("settings-save").addEventListener("click", saveSettings);
     $("ai-classify").addEventListener("click", openAiDialog);
     $("ai-cancel").addEventListener("click", closeAiDialog);
     $("ai-run").addEventListener("click", runAiClassify);
     $("open").addEventListener("click", () => { if (state.selected) window.open(state.selected.url, "_blank", "noopener"); });
 
-    Promise.all([loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]).catch(error => {
+    Promise.all([loadSettings(), loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]).catch(error => {
       sync.textContent = error.message;
     });
   </script>

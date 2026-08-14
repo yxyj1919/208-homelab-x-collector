@@ -5,16 +5,42 @@ from pathlib import Path
 from typing import Any
 
 from .classifier import RuleBasedClassifier
-from .config import DEFAULT_CATEGORIES, load_category_config, load_category_rules
+from .config import (
+    DEFAULT_CATEGORIES,
+    CategoryDefinition,
+    load_category_config,
+    load_category_rules,
+    save_category_config,
+)
 from .exporter import export_html
 from .models import Bookmark, ClassificationResult
-from .providers import PROVIDER_NAMES, ProviderOptions, build_provider
+from .providers import (
+    PROVIDER_NAMES,
+    ProviderOptions,
+    build_ollama_healthcheck_provider,
+    build_provider,
+)
+from .settings import (
+    DEFAULT_SETTINGS,
+    OLLAMA_MODEL_DISCOVERY_TIMEOUT,
+    load_settings,
+    save_settings,
+    settings_from_payload,
+)
 from .storage import BookmarkStore
 
 
 class BookmarkService:
-    def __init__(self, store: BookmarkStore) -> None:
+    def __init__(
+        self,
+        store: BookmarkStore,
+        *,
+        categories_path: Path = DEFAULT_CATEGORIES,
+        settings_path: Path = DEFAULT_SETTINGS,
+    ) -> None:
         self.store = store
+        self.categories_path = categories_path
+        self.settings_path = settings_path
 
     @classmethod
     def from_db_path(cls, db_path: Path) -> "BookmarkService":
@@ -66,6 +92,103 @@ class BookmarkService:
             "summary": sync_summary(latest_runs[0] if latest_runs else None),
         }
 
+    def settings(self) -> dict[str, Any]:
+        settings = load_settings(self.settings_path)
+        definitions = load_category_config(self.categories_path)
+        return {
+            "ollama": {
+                "url": settings.ollama_url,
+                "model": settings.ollama_model,
+                "timeout": settings.ollama_timeout,
+            },
+            "categories": [
+                {
+                    "name": category,
+                    "description": definition.description,
+                    "keywords": list(definition.keywords),
+                }
+                for category, definition in definitions.items()
+            ],
+        }
+
+    def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        ollama_payload = payload.get("ollama", {})
+        if not isinstance(ollama_payload, dict):
+            raise ValueError("ollama must be an object")
+        settings = settings_from_payload(
+            {
+                "ollama_url": ollama_payload.get("url"),
+                "ollama_model": ollama_payload.get("model"),
+                "ollama_timeout": ollama_payload.get("timeout"),
+            }
+        )
+
+        raw_categories = payload.get("categories")
+        if not isinstance(raw_categories, list):
+            raise ValueError("categories must be a list")
+        definitions: dict[str, CategoryDefinition] = {}
+        for record in raw_categories:
+            if not isinstance(record, dict):
+                raise ValueError("each category must be an object")
+            name = _text(record.get("name"))
+            if not name:
+                raise ValueError("category name is required")
+            if "\n" in name or ":" in name:
+                raise ValueError("category name must not contain ':' or newlines")
+            if name in definitions:
+                raise ValueError(f"duplicate category: {name}")
+            description = _single_line_text(record.get("description"))
+            keywords = record.get("keywords", [])
+            if isinstance(keywords, str):
+                keyword_values = _parse_csv(keywords)
+            elif isinstance(keywords, list) and all(isinstance(item, str) for item in keywords):
+                keyword_values = [
+                    keyword.strip()
+                    for item in keywords
+                    for keyword in item.split(",")
+                    if keyword.strip()
+                ]
+            else:
+                raise ValueError("category keywords must be a list of strings")
+            definitions[name] = CategoryDefinition(
+                description=description,
+                keywords=_dedupe_case_insensitive(keyword_values),
+            )
+        if not definitions:
+            raise ValueError("at least one category is required")
+
+        save_settings(settings, self.settings_path)
+        save_category_config(definitions, self.categories_path)
+        return self.settings()
+
+    def ollama_models(self, payload: dict[str, Any]) -> dict[str, Any]:
+        settings = load_settings(self.settings_path)
+        ollama_payload = payload.get("ollama", payload)
+        if not isinstance(ollama_payload, dict):
+            raise ValueError("ollama must be an object")
+        options = settings_from_payload(
+            {
+                "ollama_url": ollama_payload.get("url") or settings.ollama_url,
+                "ollama_model": ollama_payload.get("model") or settings.ollama_model,
+                "ollama_timeout": OLLAMA_MODEL_DISCOVERY_TIMEOUT,
+            }
+        )
+        checker = build_ollama_healthcheck_provider(
+            model=options.ollama_model,
+            base_url=options.ollama_url,
+            timeout_seconds=OLLAMA_MODEL_DISCOVERY_TIMEOUT,
+        )
+        models = checker.check()
+        return {
+            "ollama": {
+                "url": options.ollama_url,
+                "model": options.ollama_model,
+                "timeout": OLLAMA_MODEL_DISCOVERY_TIMEOUT,
+            },
+            "models": models,
+            "selected": options.ollama_model if options.ollama_model in models else "",
+        }
+
     def classify_bookmarks(self, payload: dict[str, Any]) -> dict[str, Any]:
         provider_name = _text(payload.get("provider")) or "ollama"
         if provider_name not in PROVIDER_NAMES:
@@ -76,17 +199,18 @@ class BookmarkService:
         reclassify = bool(payload.get("reclassify", bool(category)))
         should_export = bool(payload.get("export_html", True))
         archive_dir = _archive_dir(payload.get("archive_dir"))
-        ollama_model = _text(payload.get("ollama_model")) or "qwen2.5:7b"
-        ollama_url = _text(payload.get("ollama_url")) or "http://127.0.0.1:11434"
+        settings = load_settings(self.settings_path)
+        ollama_model = _text(payload.get("ollama_model")) or settings.ollama_model
+        ollama_url = _text(payload.get("ollama_url")) or settings.ollama_url
         ollama_timeout = _int_value(
             payload.get("ollama_timeout"),
             "ollama_timeout",
-            default=180,
+            default=settings.ollama_timeout,
             minimum=1,
             maximum=1800,
         )
 
-        definitions = load_category_config(DEFAULT_CATEGORIES)
+        definitions = load_category_config(self.categories_path)
         provider = build_provider(
             ProviderOptions(
                 name=provider_name,
@@ -265,7 +389,7 @@ class BookmarkService:
         }
 
     def _classify_unclassified_with_rules(self) -> int:
-        classifier = RuleBasedClassifier(load_category_rules(DEFAULT_CATEGORIES))
+        classifier = RuleBasedClassifier(load_category_rules(self.categories_path))
         rows = self.store.iter_bookmarks(only_unclassified=True, skip_manual=True)
         for row in rows:
             result = classifier.classify(f"{row.get('text') or ''} {row.get('author') or ''}")
@@ -406,6 +530,26 @@ def _int_value(
     if number < minimum or number > maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return number
+
+
+def _single_line_text(value: Any) -> str:
+    return " ".join(_text(value).split())
+
+
+def _parse_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _dedupe_case_insensitive(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = value.lower()
+        if key in seen:
+            continue
+        result.append(value)
+        seen.add(key)
+    return result
 
 
 def bookmark_payload(row: dict[str, Any]) -> dict[str, Any]:

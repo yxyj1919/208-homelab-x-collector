@@ -10,6 +10,7 @@ from http.server import ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 from xbookmarks.cli import main
@@ -24,6 +25,7 @@ from xbookmarks.connectors import (
     build_connector,
     read_bearer_token,
 )
+from xbookmarks.config import CategoryDefinition, load_category_config, save_category_config
 from xbookmarks.exporter import export_html, export_markdown
 from xbookmarks.models import Bookmark, ClassificationResult
 from xbookmarks.secrets import SecretStore
@@ -1362,6 +1364,134 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(bulk_body, {"updated": 1, "missing": []})
         self.assertEqual(archived_body["items"][0]["tweet_id"], "9001")
 
+    def test_web_api_reads_and_updates_settings(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            categories_path = base / "categories.yaml"
+            settings_path = base / "settings.json"
+            save_category_config(
+                {
+                    "General": CategoryDefinition(
+                        description="Fallback category", keywords=["misc"]
+                    )
+                },
+                categories_path,
+            )
+            store = BookmarkStore(base / "bookmarks.sqlite")
+
+            class Handler(XBookmarksHandler):
+                bookmark_service = BookmarkService(
+                    store,
+                    categories_path=categories_path,
+                    settings_path=settings_path,
+                )
+
+            try:
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            except PermissionError as exc:
+                raise unittest.SkipTest("local port binding is not permitted") from exc
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            try:
+                defaults = _read_json_url(f"{base_url}/api/settings")
+                updated = _read_json_url(
+                    f"{base_url}/api/settings",
+                    method="PUT",
+                    payload={
+                        "ollama": {
+                            "url": "http://192.168.31.10:11434",
+                            "model": "qwen2.5:7b",
+                            "timeout": 120,
+                        },
+                        "categories": [
+                            {
+                                "name": "Kubernetes",
+                                "description": "Kubernetes topics",
+                                "keywords": ["k8s", "kubectl", "k8s"],
+                            },
+                            {
+                                "name": "VMware",
+                                "description": "VMware topics",
+                                "keywords": ["vcenter"],
+                            },
+                        ],
+                    },
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+        definitions = load_category_config(categories_path)
+        self.assertEqual(defaults["ollama"]["url"], "http://127.0.0.1:11434")
+        self.assertEqual(updated["ollama"]["url"], "http://192.168.31.10:11434")
+        self.assertEqual(updated["ollama"]["timeout"], 120)
+        self.assertEqual(list(definitions), ["Kubernetes", "VMware"])
+        self.assertEqual(definitions["Kubernetes"].keywords, ["k8s", "kubectl"])
+
+    def test_web_api_finds_ollama_models_from_settings_input(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            categories_path = base / "categories.yaml"
+            save_category_config(
+                {"General": CategoryDefinition(description="", keywords=[])},
+                categories_path,
+            )
+            store = BookmarkStore(base / "bookmarks.sqlite")
+
+            class FakeChecker:
+                model = "llama3.2:3b"
+                base_url = "http://192.168.31.10:11434"
+                timeout_seconds = 15
+
+                def check(self) -> list[str]:
+                    return ["llama3.2:3b", "qwen2.5:7b"]
+
+            class Handler(XBookmarksHandler):
+                bookmark_service = BookmarkService(
+                    store,
+                    categories_path=categories_path,
+                    settings_path=base / "settings.json",
+                )
+
+            try:
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            except PermissionError as exc:
+                raise unittest.SkipTest("local port binding is not permitted") from exc
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            try:
+                with patch(
+                    "xbookmarks.services.build_ollama_healthcheck_provider",
+                    return_value=FakeChecker(),
+                ) as build_checker:
+                    body = _read_json_url(
+                        f"{base_url}/api/settings/ollama-models",
+                        method="POST",
+                        payload={
+                            "ollama": {
+                                "url": "http://192.168.31.10:11434",
+                                "model": "llama3.2:3b",
+                                "timeout": 15,
+                            }
+                        },
+                    )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+        build_checker.assert_called_once_with(
+            model="llama3.2:3b",
+            base_url="http://192.168.31.10:11434",
+            timeout_seconds=10,
+        )
+        self.assertEqual(body["models"], ["llama3.2:3b", "qwen2.5:7b"])
+        self.assertEqual(body["selected"], "llama3.2:3b")
+        self.assertEqual(body["ollama"]["timeout"], 10)
+
     def test_web_ui_exposes_review_queue_details(self) -> None:
         self.assertIn("Pending review", INDEX_HTML)
         self.assertIn("review-summary", INDEX_HTML)
@@ -1394,6 +1524,19 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("/api/classify", INDEX_HTML)
         self.assertIn("mediaPreviewHtml", INDEX_HTML)
         self.assertIn("item-media", INDEX_HTML)
+        self.assertIn("settings-dialog", INDEX_HTML)
+        self.assertIn("/api/settings", INDEX_HTML)
+        self.assertIn("settings-ollama-url", INDEX_HTML)
+        self.assertIn("AI classify timeout", INDEX_HTML)
+        self.assertIn("Available model", INDEX_HTML)
+        self.assertIn('<select id="settings-ollama-model">', INDEX_HTML)
+        self.assertIn("settings-categories", INDEX_HTML)
+        self.assertIn("saveSettings", INDEX_HTML)
+        self.assertIn("Add category", INDEX_HTML)
+        self.assertIn("Find models", INDEX_HTML)
+        self.assertIn("settings-find-models", INDEX_HTML)
+        self.assertIn("/api/settings/ollama-models", INDEX_HTML)
+        self.assertIn("findOllamaModels", INDEX_HTML)
 
     def test_web_api_imports_extension_bookmarks(self) -> None:
         with TemporaryDirectory() as temp_dir:
