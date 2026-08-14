@@ -318,7 +318,8 @@ INDEX_HTML = r"""<!doctype html>
     .settings-grid { display: grid; grid-template-columns: minmax(0, 1fr) 120px auto; gap: 10px; align-items: end; }
     .settings-model-row { margin-top: 10px; }
     .category-editor { display: grid; gap: 8px; margin-top: 8px; max-height: min(46vh, 520px); overflow: auto; padding-right: 2px; }
-    .category-row { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: start; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-soft); padding: 8px; }
+    .category-row { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-soft); padding: 8px; }
+    .category-field label { margin: 0 0 5px; }
     .category-row button { padding: 8px 10px; }
     .settings-status { color: var(--muted); font-size: 13px; min-height: 18px; margin-top: 10px; }
     @media (max-width: 860px) {
@@ -524,9 +525,18 @@ INDEX_HTML = r"""<!doctype html>
     function renderSettingsCategories(categories) {
       $("settings-categories").innerHTML = categories.map((category, index) => `
         <div class="category-row" data-index="${index}">
-          <input class="settings-category-name" autocomplete="off" placeholder="Name" value="${escapeHtml(category.name || "")}">
-          <input class="settings-category-description" autocomplete="off" placeholder="Description" value="${escapeHtml(category.description || "")}">
-          <input class="settings-category-keywords" autocomplete="off" placeholder="keyword, keyword" value="${escapeHtml((category.keywords || []).join(", "))}">
+          <div class="category-field">
+            <label>Category name</label>
+            <input class="settings-category-name" autocomplete="off" placeholder="Linux" value="${escapeHtml(category.name || "")}">
+          </div>
+          <div class="category-field">
+            <label>Description for AI</label>
+            <input class="settings-category-description" autocomplete="off" placeholder="What this category means" value="${escapeHtml(category.description || "")}">
+          </div>
+          <div class="category-field">
+            <label>Rule keywords</label>
+            <input class="settings-category-keywords" autocomplete="off" placeholder="linux, shell, terminal" value="${escapeHtml((category.keywords || []).join(", "))}">
+          </div>
           <button class="settings-delete-category danger" type="button">Delete</button>
         </div>
       `).join("");
@@ -552,9 +562,18 @@ INDEX_HTML = r"""<!doctype html>
       const row = document.createElement("div");
       row.className = "category-row";
       row.innerHTML = `
-        <input class="settings-category-name" autocomplete="off" placeholder="Name">
-        <input class="settings-category-description" autocomplete="off" placeholder="Description">
-        <input class="settings-category-keywords" autocomplete="off" placeholder="keyword, keyword">
+        <div class="category-field">
+          <label>Category name</label>
+          <input class="settings-category-name" autocomplete="off" placeholder="Linux">
+        </div>
+        <div class="category-field">
+          <label>Description for AI</label>
+          <input class="settings-category-description" autocomplete="off" placeholder="What this category means">
+        </div>
+        <div class="category-field">
+          <label>Rule keywords</label>
+          <input class="settings-category-keywords" autocomplete="off" placeholder="linux, shell, terminal">
+        </div>
         <button class="settings-delete-category danger" type="button">Delete</button>
       `;
       row.querySelector(".settings-delete-category").addEventListener("click", () => row.remove());
