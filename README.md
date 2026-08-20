@@ -197,11 +197,10 @@ Review queue 当前是轻量状态层：新导入记录默认进入 `pending`，
 - 可作为 unpacked extension 加载。
 - popup 检测当前 tab 是否是 X/Twitter bookmarks 页面或 tweet 页面。
 - 检查本地 Web UI `http://127.0.0.1:8765` 是否可访问。
-- 在 `x.com` / `twitter.com` 页面显示一个可拖动的 `XB` 浮动按钮，用于打开本地 UI。
-- 在已登录且已加载的 X/Twitter 页面中抓取可见 tweet card，并导入本地 SQLite。
-- 可在 bookmarks 页面自动滚动抓取已加载的收藏，并自动规则分类、导出 HTML 到 `archive/`。
-- 捕获当前 X.com 会话的 user id、CSRF cookie、GraphQL header 和 bookmarks queryId 状态，用于后续后台 GraphQL 导出。
+- popup 只保留 `Option`、`导出所有书签到API`、`下载导出文件到本地` 三个按钮。
+- 捕获当前 X.com 会话的 user id、CSRF cookie、GraphQL header 和 bookmarks queryId 状态，用于后台 GraphQL 导出。
 - 使用已捕获的 X.com 会话状态主动分页调用 bookmarks GraphQL，并将结果直接导入本地 SQLite。
+- 使用已捕获的 X.com 会话状态主动分页调用 bookmarks GraphQL，并下载本地 JSON 导出文件。
 - 配置仅保存在 Chrome extension local storage。
 
 当前不做：
@@ -219,25 +218,7 @@ PYTHONPATH=src python3 -m xbookmarks.cli web --host 127.0.0.1 --port 8765
 然后打开 `chrome://extensions`，启用 Developer mode，选择 Load unpacked，并选择
 `extension/chrome` 目录。
 
-可见收藏抓取测试方式：
-
-1. 打开 `https://x.com/i/bookmarks`。
-2. 滚动页面，让要导入的收藏出现在当前页面 DOM 中。
-3. 打开 extension popup。
-4. 点击 `Capture visible`。
-5. 回到本地 Web UI 或刷新 `http://127.0.0.1:8765/` 查看导入结果。
-
-这是原型级 DOM 抓取，只抓取当前页面已加载的可见 tweet card；X/Twitter DOM 改版时可能需要调整 selector。
-
-自动抓取整页：
-
-1. 打开 `https://x.com/i/bookmarks`。
-2. 打开 extension popup。
-3. 点击 `Capture all`。
-
-extension 会自动滚动页面，收集加载出来的 tweet card，最多滚动 80 次，连续多轮没有新
-tweet 时停止。导入完成后，本地服务会对未分类记录执行规则分类，并重新导出 `archive/`
-HTML。
+popup 中的 `Option` 用于设置本地服务地址。
 
 后台 GraphQL 导出准备状态：
 
@@ -255,12 +236,21 @@ HTML。
 
 1. 确认 `X Session Capture` 中三项都是 captured。
 2. 确认本地 UI 仍在运行：`http://127.0.0.1:8765/`。
-3. 点击 `GraphQL Export`。
+3. 点击 `导出所有书签到API`。
 
 extension 会从 background service worker 调用 X.com bookmarks GraphQL，每页最多 100 条，
 分页过程中按页 POST 到本地 `POST /api/extension/bookmarks`。分页结束后，本地服务会对未
 分类记录执行规则分类，并重新导出 `archive/` HTML。这个流程不依赖 bookmarks 页面滚动
 显示，但依赖当前 Chrome 仍登录 X.com，且依赖 X.com 内部 GraphQL schema/queryId 未变化。
+
+本地 JSON 下载：
+
+1. 确认 `X Session Capture` 中三项都是 captured。
+2. 打开 extension popup。
+3. 点击 `下载导出文件到本地`。
+
+extension 会从 background service worker 调用 X.com bookmarks GraphQL，并下载包含
+`export_metadata`、`folders` 和 `bookmarks` 的 JSON 文件。
 
 ## Sync Connector
 

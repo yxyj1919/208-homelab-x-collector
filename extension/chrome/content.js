@@ -4,43 +4,6 @@
   }
   window.__xBookmarksHelperLoaded = true;
   captureXIdentity();
-
-  const state = await chrome.storage.local.get({
-    bubblePosition: { right: 18, bottom: 18 },
-  });
-  const bubble = document.createElement("button");
-  bubble.type = "button";
-  bubble.textContent = "XB";
-  bubble.title = "X Bookmarks local helper";
-  bubble.setAttribute("aria-label", "X Bookmarks local helper");
-  Object.assign(bubble.style, {
-    position: "fixed",
-    right: `${state.bubblePosition.right}px`,
-    bottom: `${state.bubblePosition.bottom}px`,
-    zIndex: "2147483647",
-    width: "42px",
-    height: "42px",
-    border: "1px solid rgba(15, 118, 110, 0.55)",
-    borderRadius: "999px",
-    background: "#0f766e",
-    color: "#ffffff",
-    font: "650 13px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-    cursor: "grab",
-    boxShadow: "0 6px 18px rgba(15, 23, 42, 0.18)",
-  });
-
-  bubble.addEventListener("pointerdown", startDrag);
-  bubble.addEventListener("click", () => {
-    if (bubble.dataset.dragged === "true") {
-      bubble.dataset.dragged = "false";
-      return;
-    }
-    chrome.storage.local.get({ apiBaseUrl: "http://127.0.0.1:8765" }, (result) => {
-      window.open(normalizeBaseUrl(result.apiBaseUrl), "_blank", "noopener,noreferrer");
-    });
-  });
-
-  document.documentElement.appendChild(bubble);
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "xbookmarks.captureVisible") {
       sendResponse({
@@ -55,48 +18,6 @@
     }
     return false;
   });
-
-  function startDrag(event) {
-    if (event.button !== 0) {
-      return;
-    }
-    event.preventDefault();
-    bubble.setPointerCapture(event.pointerId);
-    bubble.style.cursor = "grabbing";
-
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const startRight = parseInt(bubble.style.right, 10);
-    const startBottom = parseInt(bubble.style.bottom, 10);
-    let moved = false;
-
-    function onMove(moveEvent) {
-      const nextRight = clamp(startRight - (moveEvent.clientX - startX), 8, window.innerWidth - 50);
-      const nextBottom = clamp(startBottom - (moveEvent.clientY - startY), 8, window.innerHeight - 50);
-      bubble.style.right = `${nextRight}px`;
-      bubble.style.bottom = `${nextBottom}px`;
-      moved = true;
-    }
-
-    function onUp(upEvent) {
-      bubble.releasePointerCapture(upEvent.pointerId);
-      bubble.style.cursor = "grab";
-      bubble.removeEventListener("pointermove", onMove);
-      bubble.removeEventListener("pointerup", onUp);
-      if (moved) {
-        bubble.dataset.dragged = "true";
-        chrome.storage.local.set({
-          bubblePosition: {
-            right: parseInt(bubble.style.right, 10),
-            bottom: parseInt(bubble.style.bottom, 10),
-          },
-        });
-      }
-    }
-
-    bubble.addEventListener("pointermove", onMove);
-    bubble.addEventListener("pointerup", onUp);
-  }
 })();
 
 function captureXIdentity() {
@@ -248,13 +169,4 @@ function normalizeText(value) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function normalizeBaseUrl(value) {
-  const raw = String(value || "http://127.0.0.1:8765").trim();
-  return raw.replace(/\/+$/, "") || "http://127.0.0.1:8765";
 }

@@ -13,6 +13,7 @@
     "cookies",
     "declarativeNetRequest",
     "declarativeNetRequestWithHostAccess",
+    "downloads",
     "storage",
     "unlimitedStorage",
     "webRequest"

@@ -5,12 +5,9 @@ const statusElement = document.querySelector("#status");
 const pageKindElement = document.querySelector("#page-kind");
 const tabTitleElement = document.querySelector("#tab-title");
 const tabUrlElement = document.querySelector("#tab-url");
-const openUiButton = document.querySelector("#open-ui");
 const graphqlExportButton = document.querySelector("#graphql-export");
-const captureButton = document.querySelector("#capture");
-const captureAllButton = document.querySelector("#capture-all");
+const graphqlDownloadButton = document.querySelector("#graphql-download");
 const optionsButton = document.querySelector("#options");
-const captureStatusElement = document.querySelector("#capture-status");
 const graphqlStatusElement = document.querySelector("#graphql-status");
 const userDot = document.querySelector("#user-dot");
 const userStatus = document.querySelector("#user-status");
@@ -18,7 +15,7 @@ const authDot = document.querySelector("#auth-dot");
 const authStatus = document.querySelector("#auth-status");
 const queryDot = document.querySelector("#query-dot");
 const queryStatus = document.querySelector("#query-status");
-const captureHint = document.querySelector("#capture-hint");
+const sessionHint = document.querySelector("#session-hint");
 
 let apiBaseUrl = DEFAULT_API_BASE_URL;
 let activeTabId = null;
@@ -29,10 +26,8 @@ let graphqlProgressTimer = null;
 document.addEventListener("DOMContentLoaded", async () => {
   apiBaseUrl = await getApiBaseUrl();
   apiUrlElement.textContent = apiBaseUrl;
-  openUiButton.addEventListener("click", () => chrome.tabs.create({ url: apiBaseUrl }));
   graphqlExportButton.addEventListener("click", startGraphqlExport);
-  captureButton.addEventListener("click", captureVisibleBookmarks);
-  captureAllButton.addEventListener("click", captureAllBookmarks);
+  graphqlDownloadButton.addEventListener("click", startGraphqlDownload);
   optionsButton.addEventListener("click", () => chrome.runtime.openOptionsPage());
 
   await renderActiveTab();
@@ -60,8 +55,6 @@ async function renderActiveTab() {
   activePageKind = pageKind.kind;
   pageKindElement.textContent = pageKind.label;
   pageKindElement.classList.toggle("good", pageKind.kind !== "other");
-  captureButton.disabled = !["bookmarks", "x"].includes(activePageKind);
-  captureAllButton.disabled = activePageKind !== "bookmarks";
 }
 
 async function checkLocalService() {
@@ -78,95 +71,13 @@ async function checkLocalService() {
   }
 }
 
-async function captureVisibleBookmarks() {
-  if (!activeTabId || !["bookmarks", "x"].includes(activePageKind)) {
-    captureStatusElement.textContent = "Open an X bookmarks page first.";
-    captureStatusElement.classList.add("error");
-    return;
-  }
-
-  setCaptureDisabled(true);
-  captureStatusElement.textContent = "Capturing visible bookmarks...";
-  captureStatusElement.classList.remove("error");
-
-  try {
-    const response = await chrome.tabs.sendMessage(activeTabId, {
-      type: "xbookmarks.captureVisible",
-    });
-    await importCapturedItems(response, "No visible tweets found. Scroll the bookmarks page and retry.");
-    await checkLocalService();
-  } catch (error) {
-    captureStatusElement.textContent = error.message || String(error);
-    captureStatusElement.classList.add("error");
-  } finally {
-    setCaptureDisabled(false);
-  }
-}
-
-async function captureAllBookmarks() {
-  if (!activeTabId || activePageKind !== "bookmarks") {
-    captureStatusElement.textContent = "Open https://x.com/i/bookmarks first.";
-    captureStatusElement.classList.add("error");
-    return;
-  }
-
-  setCaptureDisabled(true);
-  captureStatusElement.textContent = "Auto scrolling and capturing bookmarks...";
-  captureStatusElement.classList.remove("error");
-
-  try {
-    const response = await chrome.tabs.sendMessage(activeTabId, {
-      type: "xbookmarks.captureAll",
-      maxScrolls: 80,
-      idleRounds: 5,
-      delayMs: 900,
-    });
-    await importCapturedItems(response, "No bookmarks were captured from the page.");
-    await checkLocalService();
-  } catch (error) {
-    captureStatusElement.textContent = error.message || String(error);
-    captureStatusElement.classList.add("error");
-  } finally {
-    setCaptureDisabled(false);
-  }
-}
-
-async function importCapturedItems(response, emptyMessage) {
-  const items = response?.items || [];
-  if (!items.length) {
-    throw new Error(emptyMessage);
-  }
-
-  const importResponse = await fetch(`${apiBaseUrl}/api/extension/bookmarks`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      source: "chrome-extension",
-      source_url: response.source_url,
-      captured_at: new Date().toISOString(),
-      classify: true,
-      export_html: true,
-      archive_dir: "archive",
-      items,
-    }),
-  });
-  const body = await importResponse.json();
-  if (!importResponse.ok) {
-    throw new Error(body.error || `HTTP ${importResponse.status}`);
-  }
-  captureStatusElement.textContent =
-    `Captured ${body.unique_seen}; inserted=${body.inserted} updated=${body.updated} ` +
-    `unchanged=${body.unchanged} classified=${body.classified} exported=${body.exported}.`;
-}
-
-function setCaptureDisabled(disabled) {
+function setActionButtonsDisabled(disabled) {
   graphqlExportButton.disabled = disabled || !graphqlReady;
-  captureButton.disabled = disabled || !["bookmarks", "x"].includes(activePageKind);
-  captureAllButton.disabled = disabled || activePageKind !== "bookmarks";
+  graphqlDownloadButton.disabled = disabled || !graphqlReady;
 }
 
 async function startGraphqlExport() {
-  setCaptureDisabled(true);
+  setActionButtonsDisabled(true);
   graphqlStatusElement.textContent = "Starting GraphQL export...";
   graphqlStatusElement.classList.remove("error");
   startGraphqlProgressPolling();
@@ -192,7 +103,34 @@ async function startGraphqlExport() {
     graphqlStatusElement.classList.add("error");
   } finally {
     stopGraphqlProgressPolling();
-    setCaptureDisabled(false);
+    setActionButtonsDisabled(false);
+    await renderXSessionStatus();
+  }
+}
+
+async function startGraphqlDownload() {
+  setActionButtonsDisabled(true);
+  graphqlStatusElement.textContent = "Starting GraphQL download...";
+  graphqlStatusElement.classList.remove("error");
+  startGraphqlProgressPolling();
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "xbookmarks.graphqlDownload",
+      pageSize: 100,
+      maxPages: 200,
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || "GraphQL download failed");
+    }
+    graphqlStatusElement.textContent =
+      `Downloaded ${response.total} bookmark(s); pages=${response.pages}; file=${response.filename}.`;
+  } catch (error) {
+    graphqlStatusElement.textContent = error.message || String(error);
+    graphqlStatusElement.classList.add("error");
+  } finally {
+    stopGraphqlProgressPolling();
+    setActionButtonsDisabled(false);
     await renderXSessionStatus();
   }
 }
@@ -241,13 +179,15 @@ async function renderXSessionStatus() {
   );
 
   if (graphqlReady) {
-    captureHint.textContent = "Ready for GraphQL export phase.";
-    captureHint.classList.remove("error");
+    sessionHint.textContent = "Ready to export or download bookmarks.";
+    sessionHint.classList.remove("error");
     graphqlExportButton.disabled = false;
+    graphqlDownloadButton.disabled = false;
   } else {
-    captureHint.textContent = "Open or refresh https://x.com/i/bookmarks while logged in.";
-    captureHint.classList.add("error");
+    sessionHint.textContent = "Open or refresh https://x.com/i/bookmarks while logged in.";
+    sessionHint.classList.add("error");
     graphqlExportButton.disabled = true;
+    graphqlDownloadButton.disabled = true;
   }
 }
 

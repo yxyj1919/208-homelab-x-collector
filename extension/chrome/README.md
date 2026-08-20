@@ -7,12 +7,9 @@ Current scope:
 - Loads as an unpacked Chrome extension.
 - Detects whether the active tab is an X/Twitter bookmarks page, tweet page, or other page.
 - Checks whether the local xbookmarks Web UI is reachable.
-- Opens the local Web UI.
-- Adds a small draggable `XB` bubble on `x.com` and `twitter.com`.
-- Captures visible, already-loaded tweet cards from the current X/Twitter page and imports them into the local SQLite database.
-- Auto-scrolls the X/Twitter bookmarks page, captures loaded tweet cards, classifies them with local rules, and exports HTML to `archive/`.
 - Captures local X.com session readiness state for a future GraphQL exporter: user ID, CSRF cookie availability, selected GraphQL request headers, and bookmarks query ID.
 - Uses captured local X.com session state to page through the bookmarks GraphQL endpoint and import results directly into the local xbookmarks API.
+- Uses captured local X.com session state to download a local JSON export file.
 - Stores only local extension settings in `chrome.storage.local`.
 
 Out of scope for this prototype:
@@ -34,24 +31,7 @@ Load locally:
 4. Choose Load unpacked.
 5. Select this directory: `extension/chrome`.
 
-The default local UI URL is `http://127.0.0.1:8765`. Change it from the extension options page if needed.
-
-Visible capture:
-
-1. Open `https://x.com/i/bookmarks`.
-2. Scroll until the bookmarks you want are loaded in the page.
-3. Open the extension popup.
-4. Click Capture visible.
-
-This prototype depends on the current X/Twitter DOM. It captures only visible loaded tweet cards; it does not access browser login data or call private X APIs.
-
-Automatic page capture:
-
-1. Open `https://x.com/i/bookmarks`.
-2. Open the extension popup.
-3. Click Capture all.
-
-The extension scrolls the page and imports the loaded tweet cards. It stops after repeated idle rounds or after 80 scrolls. The local server then classifies unclassified rows with rules and exports the HTML archive.
+The default local UI URL is `http://127.0.0.1:8765`. Click `Option` in the popup to change it.
 
 GraphQL export readiness:
 
@@ -71,6 +51,14 @@ GraphQL export:
 
 1. Confirm User, Auth, and Bookmarks queryId are captured.
 2. Confirm the local UI is running at `http://127.0.0.1:8765`.
-3. Click GraphQL Export.
+3. Click `导出所有书签到API`.
 
 The background service worker pages through X.com's internal bookmarks GraphQL endpoint with the captured browser session. Each page is imported into the local API. At the end, the local server classifies unclassified rows and exports HTML to `archive/`.
+
+Local JSON download:
+
+1. Confirm User, Auth, and Bookmarks queryId are captured.
+2. Open the extension popup.
+3. Click `下载导出文件到本地`.
+
+The background service worker pages through X.com's internal bookmarks GraphQL endpoint and downloads a JSON file containing `export_metadata`, `folders`, and `bookmarks`.

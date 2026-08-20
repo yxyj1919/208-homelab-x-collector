@@ -18,13 +18,10 @@
       <div id="api-url" class="value">http://127.0.0.1:8765</div>
       <div id="status" class="status">Checking local service...</div>
       <div class="actions">
-        <button id="open-ui" class="primary" type="button">Open UI</button>
-        <button id="graphql-export" type="button" disabled>GraphQL Export</button>
-        <button id="capture" type="button" disabled>Capture visible</button>
-        <button id="capture-all" type="button" disabled>Capture all</button>
-        <button id="options" type="button">Options</button>
+        <button id="options" type="button">Option</button>
+        <button id="graphql-export" class="primary" type="button" disabled>导出所有书签到API</button>
+        <button id="graphql-download" type="button" disabled>下载导出文件到本地</button>
       </div>
-      <div id="capture-status" class="status"></div>
       <div id="graphql-status" class="status"></div>
     </section>
 
@@ -48,7 +45,7 @@
         <span id="query-dot" class="dot"></span>
         <span id="query-status">Bookmarks queryId: checking</span>
       </div>
-      <div id="capture-hint" class="status"></div>
+      <div id="session-hint" class="status"></div>
     </section>
   </main>
   <script src="popup.js"></script>

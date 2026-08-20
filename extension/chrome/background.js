@@ -81,33 +81,25 @@ function registerGraphqlHeaderRule() {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== "xbookmarks.graphqlExport") {
+  if (!["xbookmarks.graphqlExport", "xbookmarks.graphqlDownload"].includes(message?.type)) {
     return false;
   }
-  runGraphqlExport(message)
+  const action = message.type === "xbookmarks.graphqlDownload"
+    ? runGraphqlDownload
+    : runGraphqlExport;
+  action(message)
     .then((result) => sendResponse({ ok: true, ...result }))
     .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
   return true;
 });
 
 async function runGraphqlExport(options) {
-  const state = await chromeStorageGet(null);
-  const userId = state.xbookmarks_user_id;
-  if (!userId) {
-    throw new Error("User is not captured. Open https://x.com/i/bookmarks first.");
-  }
-  const creds = state[`xbookmarks_x_creds_${userId}`];
-  if (!creds?.queryId_Bookmarks) {
-    throw new Error("Bookmarks queryId is not captured. Refresh https://x.com/i/bookmarks.");
-  }
-
+  const { creds } = await graphqlExportState();
   const apiBaseUrl = normalizeBaseUrl(options.apiBaseUrl || "http://127.0.0.1:8765");
   const pageSize = clampNumber(options.pageSize, 1, 100, 100);
   const maxPages = clampNumber(options.maxPages, 1, 500, 200);
-  let cursor = null;
   let pages = 0;
   let total = 0;
-  let emptyPages = 0;
   const aggregate = {
     inserted: 0,
     updated: 0,
@@ -116,43 +108,32 @@ async function runGraphqlExport(options) {
     classified: 0,
     exported: 0,
   };
+
   await saveGraphqlProgress("running", { pages, total, ...aggregate });
-
-  while (pages < maxPages) {
-    const response = await fetchBookmarksPage({
-      queryId: creds.queryId_Bookmarks,
-      creds,
-      cursor,
-      count: pageSize,
-    });
-    const { tweets, bottomCursor } = parseBookmarksPage(response.data);
-    pages += 1;
-
-    if (tweets.length) {
-      emptyPages = 0;
-      total += tweets.length;
-      const imported = await postBookmarks(apiBaseUrl, {
-        source: "chrome-extension-graphql",
-        source_url: "https://x.com/i/bookmarks",
-        captured_at: new Date().toISOString(),
-        classify: true,
-        export_html: false,
-        archive_dir: options.archiveDir || "archive",
-        items: tweets,
-      });
-      addImportResult(aggregate, imported);
-    } else {
-      emptyPages += 1;
-    }
-
-    await saveGraphqlProgress("running", { pages, total, ...aggregate });
-
-    if (!bottomCursor || bottomCursor === cursor || emptyPages >= MAX_EMPTY_PAGES) {
-      break;
-    }
-    cursor = bottomCursor;
-    await sleep(jitteredDelay());
-  }
+  const result = await pageGraphqlBookmarks({
+    creds,
+    pageSize,
+    maxPages,
+    onPage: async ({ tweets, pages: currentPages, total: currentTotal }) => {
+      pages = currentPages;
+      total = currentTotal;
+      if (tweets.length) {
+        const imported = await postBookmarks(apiBaseUrl, {
+          source: "chrome-extension-graphql",
+          source_url: "https://x.com/i/bookmarks",
+          captured_at: new Date().toISOString(),
+          classify: true,
+          export_html: false,
+          archive_dir: options.archiveDir || "archive",
+          items: tweets,
+        });
+        addImportResult(aggregate, imported);
+      }
+      await saveGraphqlProgress("running", { pages, total, ...aggregate });
+    },
+  });
+  pages = result.pages;
+  total = result.total;
 
   const finalExport = await postBookmarks(apiBaseUrl, {
     source: "chrome-extension-graphql",
@@ -176,9 +157,82 @@ async function runGraphqlExport(options) {
   aggregate.classified = Number(finalExport.classified || aggregate.classified);
   aggregate.exported = Number(finalExport.exported || 0);
 
-  const result = { pages, total, ...aggregate };
-  await saveGraphqlProgress("complete", result);
-  return result;
+  const exportResult = { pages, total, ...aggregate };
+  await saveGraphqlProgress("complete", exportResult);
+  return exportResult;
+}
+
+async function runGraphqlDownload(options) {
+  const { userId, screenName, creds } = await graphqlExportState();
+  const pageSize = clampNumber(options.pageSize, 1, 100, 100);
+  const maxPages = clampNumber(options.maxPages, 1, 500, 200);
+  const bookmarks = [];
+  await saveGraphqlProgress("running", { pages: 0, total: 0 });
+  const result = await pageGraphqlBookmarks({
+    creds,
+    pageSize,
+    maxPages,
+    onPage: async ({ tweets, pages, total }) => {
+      bookmarks.push(...tweets);
+      await saveGraphqlProgress("running", { pages, total });
+    },
+  });
+  const filename = await downloadBookmarksJson({
+    bookmarks,
+    pages: result.pages,
+    userId,
+    screenName,
+  });
+  const downloadResult = { pages: result.pages, total: result.total, filename };
+  await saveGraphqlProgress("complete", downloadResult);
+  return downloadResult;
+}
+
+async function graphqlExportState() {
+  const state = await chromeStorageGet(null);
+  const userId = state.xbookmarks_user_id;
+  if (!userId) {
+    throw new Error("User is not captured. Open https://x.com/i/bookmarks first.");
+  }
+  const creds = state[`xbookmarks_x_creds_${userId}`];
+  if (!creds?.queryId_Bookmarks) {
+    throw new Error("Bookmarks queryId is not captured. Refresh https://x.com/i/bookmarks.");
+  }
+  return { userId, screenName: state.xbookmarks_screen_name || "", creds };
+}
+
+async function pageGraphqlBookmarks({ creds, pageSize, maxPages, onPage }) {
+  let cursor = null;
+  let pages = 0;
+  let total = 0;
+  let emptyPages = 0;
+
+  while (pages < maxPages) {
+    const response = await fetchBookmarksPage({
+      queryId: creds.queryId_Bookmarks,
+      creds,
+      cursor,
+      count: pageSize,
+    });
+    const { tweets, bottomCursor } = parseBookmarksPage(response.data);
+    pages += 1;
+
+    if (tweets.length) {
+      emptyPages = 0;
+      total += tweets.length;
+    } else {
+      emptyPages += 1;
+    }
+
+    await onPage({ tweets, pages, total });
+
+    if (!bottomCursor || bottomCursor === cursor || emptyPages >= MAX_EMPTY_PAGES) {
+      break;
+    }
+    cursor = bottomCursor;
+    await sleep(jitteredDelay());
+  }
+  return { pages, total };
 }
 
 async function saveGraphqlProgress(state, progress) {
@@ -410,6 +464,33 @@ async function postBookmarks(apiBaseUrl, payload) {
   return body;
 }
 
+async function downloadBookmarksJson({ bookmarks, pages, userId, screenName }) {
+  const exportedAt = new Date().toISOString();
+  const safeUser = (screenName || userId || "x-user").replace(/[^a-zA-Z0-9_-]+/g, "-");
+  const timestamp = exportedAt.replace(/[:.]/g, "-");
+  const filename = `xbookmarks-${safeUser}-${timestamp}.json`;
+  const payload = {
+    export_metadata: {
+      source: "chrome-extension-graphql",
+      source_url: "https://x.com/i/bookmarks",
+      exported_at: exportedAt,
+      pages,
+      count: bookmarks.length,
+      user_id: userId,
+      screen_name: screenName || null,
+    },
+    folders: [],
+    bookmarks,
+  };
+  const dataUrl = `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(payload, null, 2))}`;
+  await chromeDownloadsDownload({
+    url: dataUrl,
+    filename,
+    saveAs: true,
+  });
+  return filename;
+}
+
 function addImportResult(total, result) {
   total.inserted += Number(result.inserted || 0);
   total.updated += Number(result.updated || 0);
@@ -469,6 +550,19 @@ function chromeStorageGet(keys) {
 
 function chromeCookieGet(details) {
   return new Promise((resolve) => chrome.cookies.get(details, resolve));
+}
+
+function chromeDownloadsDownload(details) {
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download(details, (downloadId) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        reject(new Error(error.message));
+        return;
+      }
+      resolve(downloadId);
+    });
+  });
 }
 
 function clampNumber(value, min, max, fallback) {
