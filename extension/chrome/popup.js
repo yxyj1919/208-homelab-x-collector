@@ -33,6 +33,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await renderActiveTab();
   await checkLocalService();
   await renderXSessionStatus();
+  await renderGraphqlProgress();
 });
 
 async function getApiBaseUrl() {
@@ -80,7 +81,6 @@ async function startGraphqlExport() {
   setActionButtonsDisabled(true);
   graphqlStatusElement.textContent = "Starting GraphQL export...";
   graphqlStatusElement.classList.remove("error");
-  startGraphqlProgressPolling();
 
   try {
     const response = await chrome.runtime.sendMessage({
@@ -93,18 +93,14 @@ async function startGraphqlExport() {
     if (!response?.ok) {
       throw new Error(response?.error || "GraphQL export failed");
     }
-    graphqlStatusElement.textContent =
-      `GraphQL exported ${response.total}; pages=${response.pages} ` +
-      `inserted=${response.inserted} updated=${response.updated} unchanged=${response.unchanged} ` +
-      `classified=${response.classified} html=${response.exported}.`;
-    await checkLocalService();
+    graphqlStatusElement.textContent = response.started
+      ? "GraphQL export started. You can switch tabs; completion will be notified."
+      : `GraphQL ${response.action || "export"} is already running.`;
+    startGraphqlProgressPolling();
   } catch (error) {
     graphqlStatusElement.textContent = error.message || String(error);
     graphqlStatusElement.classList.add("error");
-  } finally {
-    stopGraphqlProgressPolling();
     setActionButtonsDisabled(false);
-    await renderXSessionStatus();
   }
 }
 
@@ -112,26 +108,25 @@ async function startGraphqlDownload() {
   setActionButtonsDisabled(true);
   graphqlStatusElement.textContent = "Starting GraphQL download...";
   graphqlStatusElement.classList.remove("error");
-  startGraphqlProgressPolling();
 
   try {
     const response = await chrome.runtime.sendMessage({
       type: "xbookmarks.graphqlDownload",
+      apiBaseUrl,
       pageSize: 100,
       maxPages: 200,
     });
     if (!response?.ok) {
       throw new Error(response?.error || "GraphQL download failed");
     }
-    graphqlStatusElement.textContent =
-      `Downloaded ${response.total} bookmark(s); pages=${response.pages}; file=${response.filename}.`;
+    graphqlStatusElement.textContent = response.started
+      ? "GraphQL download started. You can switch tabs; completion will be notified."
+      : `GraphQL ${response.action || "download"} is already running.`;
+    startGraphqlProgressPolling();
   } catch (error) {
     graphqlStatusElement.textContent = error.message || String(error);
     graphqlStatusElement.classList.add("error");
-  } finally {
-    stopGraphqlProgressPolling();
     setActionButtonsDisabled(false);
-    await renderXSessionStatus();
   }
 }
 
@@ -151,13 +146,35 @@ function stopGraphqlProgressPolling() {
 async function renderGraphqlProgress() {
   const state = await chrome.storage.local.get("xbookmarks_graphql_export_status");
   const progress = state.xbookmarks_graphql_export_status;
-  if (!progress || progress.state !== "running") {
+  if (!progress) {
     return;
   }
+  const action = progress.action === "download" ? "download" : "export";
+  if (progress.state === "complete") {
+    stopGraphqlProgressPolling();
+    graphqlStatusElement.classList.remove("error");
+    graphqlStatusElement.textContent = action === "download"
+      ? `Download complete: ${progress.total || 0} bookmark(s); pages=${progress.pages || 0}; file=${progress.filename || "JSON file"}.`
+      : `Export complete: ${progress.total || 0} bookmark(s); pages=${progress.pages || 0}; ` +
+        `new=${progress.inserted || 0} updated=${progress.updated || 0} unchanged=${progress.unchanged || 0}; ` +
+        `classified=${progress.classified || 0} html=${progress.exported || 0}.`;
+    setActionButtonsDisabled(false);
+    await checkLocalService();
+    return;
+  }
+  if (progress.state === "failed") {
+    stopGraphqlProgressPolling();
+    graphqlStatusElement.textContent = progress.error || `GraphQL ${action} failed.`;
+    graphqlStatusElement.classList.add("error");
+    setActionButtonsDisabled(false);
+    return;
+  }
+  if (progress.state !== "running") {
+    return;
+  }
+  setActionButtonsDisabled(true);
   graphqlStatusElement.textContent =
-    `GraphQL running: pages=${progress.pages || 0} imported=${progress.total || 0} ` +
-    `inserted=${progress.inserted || 0} updated=${progress.updated || 0} ` +
-    `unchanged=${progress.unchanged || 0} classified=${progress.classified || 0}.`;
+    `GraphQL ${action} running: pages=${progress.pages || 0} fetched=${progress.total || 0}.`;
 }
 
 async function renderXSessionStatus() {

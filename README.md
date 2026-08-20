@@ -188,69 +188,143 @@ PYTHONPATH=src python3 -m xbookmarks.cli web --host 127.0.0.1 --port 8765
 Review queue 当前是轻量状态层：新导入记录默认进入 `pending`，低置信度自动分类会保持
 `pending` 并记录原因；旧库迁移后的历史记录默认视为 `accepted`，避免升级后全部进入待审核。
 
-## Chrome Extension Prototype
+## New User Setup
 
-项目内包含一个最小 Chrome extension 原型：`extension/chrome`。
+这一节面向首次使用者，推荐用本地 Web UI 加 Chrome extension 完成 X bookmarks 归档。
 
-当前只用于辅助本地归档流程：
+### 1. 初始化本地项目
 
-- 可作为 unpacked extension 加载。
-- popup 检测当前 tab 是否是 X/Twitter bookmarks 页面或 tweet 页面。
-- 检查本地 Web UI `http://127.0.0.1:8765` 是否可访问。
-- popup 只保留 `Option`、`导出所有书签到API`、`下载导出文件到本地` 三个按钮。
-- 捕获当前 X.com 会话的 user id、CSRF cookie、GraphQL header 和 bookmarks queryId 状态，用于后台 GraphQL 导出。
-- 使用已捕获的 X.com 会话状态主动分页调用 bookmarks GraphQL，并将结果直接导入本地 SQLite。
-- 使用已捕获的 X.com 会话状态主动分页调用 bookmarks GraphQL，并下载本地 JSON 导出文件。
-- 配置仅保存在 Chrome extension local storage。
-
-当前不做：
-
-- 不处理 X/Twitter 登录。
-- 不把 X.com cookie/header/token 写入项目文件、SQLite、运行日志或 HTML archive。
-- 不使用官方 X API / OAuth 路线。
-
-加载方式：
+在项目目录中执行：
 
 ```bash
-PYTHONPATH=src python3 -m xbookmarks.cli web --host 127.0.0.1 --port 8765
+PYTHONPATH=src python3 -m xbookmarks.cli init --write-categories
 ```
 
-然后打开 `chrome://extensions`，启用 Developer mode，选择 Load unpacked，并选择
-`extension/chrome` 目录。
+默认会写入：
 
-popup 中的 `Option` 用于设置本地服务地址。
+- SQLite 数据库：`data/bookmarks.sqlite`
+- 分类配置：`config/categories.yaml`
 
-后台 GraphQL 导出准备状态：
+### 2. 启动本地 Web UI
 
-1. 重新加载 extension。
-2. 打开或刷新 `https://x.com/i/bookmarks`。
-3. 打开 extension popup。
-4. 查看 `X Session Capture`：
-   - `User`：已从当前 X.com 会话捕获 user id。
-   - `Auth`：已从 X.com GraphQL 请求捕获认证相关 header。
-   - `Bookmarks queryId`：已捕获 bookmarks GraphQL operation queryId。
+推荐使用 `8766` 端口，方便和 extension 配置保持一致：
 
-这一步只做状态捕获和本地显示，不主动调用 X.com GraphQL 导出接口。
+```bash
+PYTHONPATH=src python3 -m xbookmarks.cli --db data/bookmarks.sqlite web --host 127.0.0.1 --port 8766
+```
 
-后台 GraphQL 导出：
+然后打开：
 
-1. 确认 `X Session Capture` 中三项都是 captured。
-2. 确认本地 UI 仍在运行：`http://127.0.0.1:8765/`。
-3. 点击 `导出所有书签到API`。
+```text
+http://127.0.0.1:8766/
+```
 
-extension 会从 background service worker 调用 X.com bookmarks GraphQL，每页最多 100 条，
-分页过程中按页 POST 到本地 `POST /api/extension/bookmarks`。分页结束后，本地服务会对未
-分类记录执行规则分类，并重新导出 `archive/` HTML。这个流程不依赖 bookmarks 页面滚动
-显示，但依赖当前 Chrome 仍登录 X.com，且依赖 X.com 内部 GraphQL schema/queryId 未变化。
+Web UI 可以查看、搜索、过滤、批量分类、归档和编辑 bookmarks。
 
-本地 JSON 下载：
+### 3. 加载 Chrome extension
 
-1. 确认 `X Session Capture` 中三项都是 captured。
-2. 打开 extension popup。
-3. 点击 `下载导出文件到本地`。
+项目内置 extension 目录：
 
-extension 会从 background service worker 调用 X.com bookmarks GraphQL，并下载包含
-`export_metadata`、`folders` 和 `bookmarks` 的 JSON 文件。
+```text
+extension/chrome
+```
+
+加载步骤：
+
+1. 打开 `chrome://extensions`。
+2. 启用 `Developer mode`。
+3. 点击 `Load unpacked`。
+4. 选择项目里的 `extension/chrome` 目录。
+5. 如果之后更新了 extension 代码或权限，回到 `chrome://extensions` 点击 `Reload`。
+
+### 4. 配置 extension 服务地址
+
+点击 Chrome 工具栏里的 `X Bookmarks Local Helper` 图标。
+
+点击：
+
+```text
+Option
+```
+
+把 Local UI URL 设置为：
+
+```text
+http://127.0.0.1:8766
+```
+
+点击 `Save`。
+
+### 5. 捕获 X 会话状态
+
+在同一个 Chrome 里登录 X，然后打开：
+
+```text
+https://x.com/i/bookmarks
+```
+
+刷新页面一次，再打开 extension popup。确认 `X Session Capture` 中三项都是 captured：
+
+- `User`
+- `Auth`
+- `Bookmarks queryId`
+
+如果没有 captured，先确认 Chrome 已登录 X，然后刷新 `https://x.com/i/bookmarks`。
+
+### 6. 导出书签到本地应用
+
+确认本地 Web UI 正在运行，并且 extension 的 Local UI URL 指向 `http://127.0.0.1:8766`。
+
+在 extension popup 点击：
+
+```text
+导出所有书签到API
+```
+
+导出行为：
+
+- extension background 会分页调用 X.com bookmarks GraphQL。
+- 抓取过程中 Web UI 的 `Import status` 会绿灯闪烁，并显示页数和已抓取数量。
+- 抓取完成后 extension 会一次性提交到本地 `POST /api/extension/bookmarks`。
+- 本地服务会导入 SQLite、执行规则分类，并导出 HTML 到 `archive/`。
+- 完成后 Web UI 绿灯常亮 12 秒，并显示导入摘要。
+- Chrome 会显示导出完成通知。
+
+### 7. 下载 JSON 备份
+
+如果需要单独保存一份 JSON 文件，在 extension popup 点击：
+
+```text
+下载导出文件到本地
+```
+
+下载文件包含：
+
+- `export_metadata`
+- `folders`
+- `bookmarks`
+
+### 8. 使用 Web UI 管理 bookmarks
+
+Web UI 常用操作：
+
+- 搜索 bookmarks。
+- 按分类过滤。
+- 按 `active`、`unread`、`read`、`important`、`pending_review`、`archived` 过滤。
+- 单条编辑分类、标签、备注、read、important、archived。
+- 选中多条 bookmarks 后批量：
+  - `Accept`
+  - `Archive`
+  - 从分类下拉菜单选择分类并点击 `Apply category`
+- 在 `Settings` 中配置 Ollama 地址、模型、AI classify timeout 和分类规则。
+
+### 9. 注意事项
+
+- extension 不负责登录 X；必须先在 Chrome 中登录 X。
+- extension 使用当前浏览器会话和 X.com 内部 GraphQL，请只在自己的账号和本机环境使用。
+- X.com cookie、header、token 不会写入项目文件、SQLite、运行日志或 HTML archive。
+- 如果 extension 权限有变化，需要在 `chrome://extensions` 重新加载 extension。
+- `data/`、`archive/`、`obsidian-archive/`、`config/settings.json` 是本地运行数据，不建议提交到 Git。
 
 ## Sync Connector
 

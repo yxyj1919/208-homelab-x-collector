@@ -1565,6 +1565,8 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("bulkUpdateSelected", INDEX_HTML)
         self.assertIn("/api/bookmarks/bulk", INDEX_HTML)
         self.assertIn("bulk-category", INDEX_HTML)
+        self.assertIn("renderBulkCategoryOptions", INDEX_HTML)
+        self.assertIn("Select category", INDEX_HTML)
         self.assertIn("ai-classify", INDEX_HTML)
         self.assertIn("ai-dialog", INDEX_HTML)
         self.assertIn("ai-category", INDEX_HTML)
@@ -1645,6 +1647,46 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(list_body["items"][0]["tweet_id"], "9101")
         self.assertEqual(state["last_connector"], "chrome-extension")
         self.assertEqual(state["chrome-extension.source_url"], "https://x.com/i/bookmarks")
+
+    def test_web_api_tracks_extension_progress(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+
+            class Handler(XBookmarksHandler):
+                bookmark_service = BookmarkService(store)
+                extension_progress = {"state": "idle"}
+
+            try:
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            except PermissionError as exc:
+                raise unittest.SkipTest("local port binding is not permitted") from exc
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            try:
+                progress_body = _read_json_url(
+                    f"{base_url}/api/extension/progress",
+                    method="POST",
+                    payload={
+                        "state": "running",
+                        "action": "export",
+                        "job_id": "job-1",
+                        "pages": 3,
+                        "total": 240,
+                        "updated_at": 123456,
+                    },
+                )
+                read_body = _read_json_url(f"{base_url}/api/extension/progress")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+        self.assertEqual(progress_body["progress"]["state"], "running")
+        self.assertEqual(read_body["progress"]["action"], "export")
+        self.assertEqual(read_body["progress"]["pages"], 3)
+        self.assertEqual(read_body["progress"]["total"], 240)
+        self.assertEqual(read_body["progress"]["updated_at"], 123456)
 
     def test_web_api_classifies_bookmarks(self) -> None:
         with TemporaryDirectory() as temp_dir:

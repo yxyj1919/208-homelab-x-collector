@@ -26,6 +26,7 @@ def run_web_server(db_path: Path, host: str = "127.0.0.1", port: int = 8765) -> 
 
 class XBookmarksHandler(BaseHTTPRequestHandler):
     bookmark_service: BookmarkService
+    extension_progress: dict[str, Any] = {"state": "idle"}
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -43,6 +44,9 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/sync-status":
             self._handle_sync_status()
+            return
+        if parsed.path == "/api/extension/progress":
+            self._handle_extension_progress()
             return
         if parsed.path == "/api/settings":
             self._handle_settings()
@@ -89,6 +93,9 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/extension/bookmarks":
             self._handle_extension_bookmarks()
             return
+        if parsed.path == "/api/extension/progress":
+            self._handle_update_extension_progress()
+            return
         self._send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def log_message(self, format: str, *args: object) -> None:
@@ -119,6 +126,9 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
 
     def _handle_sync_status(self) -> None:
         self._send_json(self.bookmark_service.sync_status(latest_limit=5))
+
+    def _handle_extension_progress(self) -> None:
+        self._send_json({"progress": self.extension_progress})
 
     def _handle_settings(self) -> None:
         try:
@@ -183,6 +193,31 @@ class XBookmarksHandler(BaseHTTPRequestHandler):
             return
         self._send_json(response, status=HTTPStatus.CREATED)
 
+    def _handle_update_extension_progress(self) -> None:
+        try:
+            payload = self._read_json()
+            state = _progress_state(payload.get("state"))
+            progress = {
+                "state": state,
+                "action": _progress_text(payload.get("action")),
+                "job_id": _progress_text(payload.get("job_id")),
+                "pages": _progress_int(payload.get("pages")),
+                "total": _progress_int(payload.get("total")),
+                "inserted": _progress_int(payload.get("inserted")),
+                "updated": _progress_int(payload.get("updated")),
+                "unchanged": _progress_int(payload.get("unchanged")),
+                "classified": _progress_int(payload.get("classified")),
+                "exported": _progress_int(payload.get("exported")),
+                "filename": _progress_text(payload.get("filename")),
+                "error": _progress_text(payload.get("error")),
+                "updated_at": _progress_int(payload.get("updated_at")),
+            }
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        type(self).extension_progress = progress
+        self._send_json({"progress": progress})
+
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
@@ -236,6 +271,27 @@ def _int_param(
     return value
 
 
+def _progress_state(value: object) -> str:
+    state = _progress_text(value) or "idle"
+    if state not in {"idle", "running", "complete", "failed"}:
+        raise ValueError("state must be idle, running, complete, or failed")
+    return state
+
+
+def _progress_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _progress_int(value: object) -> int:
+    if value in (None, ""):
+        return 0
+    number = int(value)
+    return max(number, 0)
+
+
 INDEX_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -258,10 +314,16 @@ INDEX_HTML = r"""<!doctype html>
     button:disabled { color: #98a2b3; cursor: not-allowed; background: #f2f4f7; }
     button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
     button.danger { color: var(--danger); }
-    .dashboard { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .dashboard { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
     .metric { border: 1px solid var(--line); border-radius: 8px; background: var(--panel-soft); padding: 9px 10px; min-width: 0; }
     .metric-label { color: var(--muted); font-size: 12px; line-height: 1.2; }
     .metric-value { margin-top: 4px; font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .import-indicator { display: flex; align-items: center; gap: 7px; }
+    .status-dot { width: 9px; height: 9px; border-radius: 999px; background: #98a2b3; box-shadow: 0 0 0 3px rgba(152, 162, 179, 0.12); flex: 0 0 auto; }
+    .status-dot.active { background: #12b76a; box-shadow: 0 0 0 3px rgba(18, 183, 106, 0.16); }
+    .status-dot.running { background: #12b76a; box-shadow: 0 0 0 3px rgba(18, 183, 106, 0.16); animation: pulse-green 1.1s ease-in-out infinite; }
+    .status-dot.error { background: var(--danger); box-shadow: 0 0 0 3px rgba(180, 35, 24, 0.14); }
+    @keyframes pulse-green { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
     main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 18px; padding: 18px 24px; }
     .status { color: var(--muted); font-size: 13px; margin-top: 10px; min-height: 18px; }
     .list { display: grid; gap: 10px; align-content: start; }
@@ -376,6 +438,13 @@ INDEX_HTML = r"""<!doctype html>
         <div class="metric-label">Pending review</div>
         <div class="metric-value" id="review-summary">0</div>
       </div>
+      <div class="metric">
+        <div class="metric-label">Import status</div>
+        <div class="metric-value import-indicator">
+          <span id="import-dot" class="status-dot"></span>
+          <span id="import-status">Idle</span>
+        </div>
+      </div>
     </div>
     <div id="sync" class="status"></div>
   </header>
@@ -385,7 +454,7 @@ INDEX_HTML = r"""<!doctype html>
         <span id="bulk-count">0 selected</span>
         <button id="bulk-accept" type="button">Accept</button>
         <button id="bulk-archive" type="button">Archive</button>
-        <input id="bulk-category" autocomplete="off" placeholder="Category">
+        <select id="bulk-category"></select>
         <button id="bulk-category-apply" type="button">Apply category</button>
       </div>
       <div id="list" class="list"></div>
@@ -475,7 +544,7 @@ INDEX_HTML = r"""<!doctype html>
     </form>
   </dialog>
   <script>
-    const state = { items: [], selected: null, selectedIds: new Set(), skippedReviewIds: new Set(), aiTimer: null, settings: null, lastSyncKey: "" };
+    const state = { items: [], selected: null, selectedIds: new Set(), skippedReviewIds: new Set(), aiTimer: null, settings: null, lastSyncKey: "", lastProgressKey: "", importStatusTimer: null };
     const $ = (id) => document.getElementById(id);
     const query = $("query"), category = $("category"), status = $("status");
     const list = $("list"), sync = $("sync"), reviewSummary = $("review-summary");
@@ -498,7 +567,18 @@ INDEX_HTML = r"""<!doctype html>
       category.innerHTML = '<option value="">All categories</option>' +
         body.categories.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} (${c.count})</option>`).join("");
       category.value = current;
+      renderBulkCategoryOptions(body.categories);
       renderAiCategoryOptions(body.categories);
+    }
+
+    function renderBulkCategoryOptions(categories) {
+      const current = $("bulk-category").value;
+      $("bulk-category").innerHTML = '<option value="">Select category</option>' +
+        categories
+          .filter(c => c.name !== "Unclassified")
+          .map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} (${c.count})</option>`)
+          .join("");
+      $("bulk-category").value = current;
     }
 
     async function loadSettings() {
@@ -666,6 +746,7 @@ INDEX_HTML = r"""<!doctype html>
         $("sync-imported").textContent = "0 source";
         $("sync-classified").textContent = "0";
         sync.textContent = "";
+        setImportStatus("idle", "Idle");
         return null;
       }
       const more = summary.has_more ? " · more pages available" : "";
@@ -681,6 +762,86 @@ INDEX_HTML = r"""<!doctype html>
       return `${summary.id || ""}:${summary.status || ""}:${summary.finished_at || ""}:${summary.imported || 0}:${summary.exported || 0}`;
     }
 
+    function importSummary(summary) {
+      if (!summary) return "Idle";
+      if (summary.status === "failed") return "Import failed";
+      const source = Number(summary.source_count || summary.imported || 0);
+      const inserted = Number(summary.inserted || 0);
+      const updated = Number(summary.updated || 0);
+      const exported = Number(summary.exported || 0);
+      return `${source} source · ${inserted} new · ${updated} updated · exported ${exported}`;
+    }
+
+    function setImportStatus(mode, text, autoIdle = false) {
+      const dot = $("import-dot");
+      const label = $("import-status");
+      dot.classList.toggle("active", mode === "active");
+      dot.classList.toggle("running", mode === "running");
+      dot.classList.toggle("error", mode === "error");
+      label.textContent = text;
+      if (state.importStatusTimer) {
+        window.clearTimeout(state.importStatusTimer);
+        state.importStatusTimer = null;
+      }
+      if (autoIdle) {
+        state.importStatusTimer = window.setTimeout(() => setImportStatus("idle", "Idle"), 12000);
+      }
+    }
+
+    function progressKey(progress) {
+      if (!progress) return "";
+      return `${progress.state || ""}:${progress.action || ""}:${progress.job_id || ""}:${progress.updated_at || ""}:${progress.total || 0}`;
+    }
+
+    function progressSummary(progress) {
+      const action = progress.action === "download" ? "download" : "export";
+      const pages = Number(progress.pages || 0);
+      const total = Number(progress.total || 0);
+      if (progress.state === "running") {
+        return `${action} running · pages ${pages} · fetched ${total}`;
+      }
+      if (progress.state === "complete") {
+        if (action === "download") {
+          return `download complete · ${total} source`;
+        }
+        return `export complete · ${total} source · ${Number(progress.updated || 0)} updated · exported ${Number(progress.exported || 0)}`;
+      }
+      if (progress.state === "failed") {
+        return progress.error || `${action} failed`;
+      }
+      return "Idle";
+    }
+
+    async function loadExtensionProgress(silentComplete = false) {
+      const body = await api("/api/extension/progress");
+      const progress = body.progress || {};
+      const key = progressKey(progress);
+      if (progress.state === "running") {
+        state.lastProgressKey = key;
+        setImportStatus("running", progressSummary(progress));
+        return progress;
+      }
+      if (silentComplete && (progress.state === "complete" || progress.state === "failed")) {
+        state.lastProgressKey = key;
+        return progress;
+      }
+      if (progress.state === "complete" && key && key !== state.lastProgressKey) {
+        state.lastProgressKey = key;
+        setImportStatus("active", progressSummary(progress), true);
+        return progress;
+      }
+      if (progress.state === "failed" && key && key !== state.lastProgressKey) {
+        state.lastProgressKey = key;
+        setImportStatus("error", progressSummary(progress));
+        return progress;
+      }
+      if (!progress.state || progress.state === "idle") {
+        state.lastProgressKey = key;
+        setImportStatus("idle", "Idle");
+      }
+      return progress;
+    }
+
     async function refreshAll() {
       const [, summary] = await Promise.all([loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]);
       state.lastSyncKey = syncKey(summary);
@@ -689,17 +850,23 @@ INDEX_HTML = r"""<!doctype html>
     async function pollExternalChanges() {
       if (document.visibilityState !== "visible") return;
       try {
+        await loadExtensionProgress();
         const summary = await loadSyncStatus();
         const key = syncKey(summary);
         if (key && state.lastSyncKey && key !== state.lastSyncKey) {
           state.lastSyncKey = key;
+          setImportStatus(
+            summary.status === "failed" ? "error" : "active",
+            importSummary(summary),
+            summary.status !== "failed",
+          );
           await Promise.all([loadCategories(), loadReviewSummary(), loadItems()]);
-          sync.textContent = `${sync.textContent} · refreshed`;
         } else if (key && !state.lastSyncKey) {
           state.lastSyncKey = key;
         }
       } catch (error) {
         sync.textContent = error.message;
+        setImportStatus("error", "Refresh failed");
       }
     }
 
@@ -1121,7 +1288,10 @@ INDEX_HTML = r"""<!doctype html>
 
     Promise.all([loadSettings(), loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]).then(([, , summary]) => {
       state.lastSyncKey = syncKey(summary);
-      window.setInterval(pollExternalChanges, 5000);
+      loadExtensionProgress(true).catch(error => {
+        sync.textContent = error.message;
+      });
+      window.setInterval(pollExternalChanges, 2000);
     }).catch(error => {
       sync.textContent = error.message;
     });
