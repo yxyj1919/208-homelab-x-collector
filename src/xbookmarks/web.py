@@ -309,10 +309,12 @@ INDEX_HTML = r"""<!doctype html>
     .bulk-actions[data-active="false"] { display: none; }
     .bulk-actions span { color: var(--muted); font-size: 13px; }
     .empty { color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; padding: 24px; text-align: center; }
-    dialog { border: 1px solid var(--line); border-radius: 8px; padding: 0; width: min(420px, calc(100vw - 32px)); color: var(--text); }
+    dialog { border: 1px solid var(--line); border-radius: 8px; padding: 0; width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 32px); color: var(--text); }
     dialog::backdrop { background: rgba(15, 23, 42, 0.28); }
-    .modal { padding: 18px; background: var(--panel); }
+    .modal { padding: 18px; background: var(--panel); max-height: calc(100vh - 32px); overflow: auto; }
     .modal h2 { margin: 0 0 12px; font-size: 18px; letter-spacing: 0; }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: -18px -18px 12px; padding: 14px 18px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: -18px; z-index: 2; }
+    .modal-header h2 { margin: 0; }
     .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
     .settings-modal { width: min(900px, calc(100vw - 32px)); }
     .settings-grid { display: grid; grid-template-columns: minmax(0, 1fr) 120px auto; gap: 10px; align-items: end; }
@@ -441,7 +443,10 @@ INDEX_HTML = r"""<!doctype html>
   </dialog>
   <dialog id="settings-dialog" class="settings-modal">
     <form method="dialog" class="modal">
-      <h2>Settings</h2>
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button id="settings-close" type="button">Close</button>
+      </div>
       <div class="section-title">Ollama</div>
       <div class="settings-grid">
         <div>
@@ -470,7 +475,7 @@ INDEX_HTML = r"""<!doctype html>
     </form>
   </dialog>
   <script>
-    const state = { items: [], selected: null, selectedIds: new Set(), skippedReviewIds: new Set(), aiTimer: null, settings: null };
+    const state = { items: [], selected: null, selectedIds: new Set(), skippedReviewIds: new Set(), aiTimer: null, settings: null, lastSyncKey: "" };
     const $ = (id) => document.getElementById(id);
     const query = $("query"), category = $("category"), status = $("status");
     const list = $("list"), sync = $("sync"), reviewSummary = $("review-summary");
@@ -661,13 +666,41 @@ INDEX_HTML = r"""<!doctype html>
         $("sync-imported").textContent = "0 source";
         $("sync-classified").textContent = "0";
         sync.textContent = "";
-        return;
+        return null;
       }
       const more = summary.has_more ? " · more pages available" : "";
       $("sync-last").textContent = `${summary.status} · ${summary.finished_at || "unfinished"}`;
       $("sync-imported").textContent = `${summary.source_count} source · ${summary.inserted} new · ${summary.updated} updated`;
       $("sync-classified").textContent = `${summary.classified} · exported ${summary.exported}`;
       sync.textContent = `${summary.connector || "unknown"} · unchanged ${summary.unchanged} · pages ${summary.pages_fetched}${more}`;
+      return summary;
+    }
+
+    function syncKey(summary) {
+      if (!summary) return "";
+      return `${summary.id || ""}:${summary.status || ""}:${summary.finished_at || ""}:${summary.imported || 0}:${summary.exported || 0}`;
+    }
+
+    async function refreshAll() {
+      const [, summary] = await Promise.all([loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]);
+      state.lastSyncKey = syncKey(summary);
+    }
+
+    async function pollExternalChanges() {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const summary = await loadSyncStatus();
+        const key = syncKey(summary);
+        if (key && state.lastSyncKey && key !== state.lastSyncKey) {
+          state.lastSyncKey = key;
+          await Promise.all([loadCategories(), loadReviewSummary(), loadItems()]);
+          sync.textContent = `${sync.textContent} · refreshed`;
+        } else if (key && !state.lastSyncKey) {
+          state.lastSyncKey = key;
+        }
+      } catch (error) {
+        sync.textContent = error.message;
+      }
     }
 
     async function loadReviewSummary() {
@@ -1067,7 +1100,7 @@ INDEX_HTML = r"""<!doctype html>
     query.addEventListener("input", debounce(() => { resetSkippedReviewIds(); loadItems(); }, 250));
     category.addEventListener("change", () => { resetSkippedReviewIds(); loadItems(); });
     status.addEventListener("change", () => { resetSkippedReviewIds(); loadItems(); });
-    $("refresh").addEventListener("click", () => { resetSkippedReviewIds(); return Promise.all([loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]); });
+    $("refresh").addEventListener("click", () => { resetSkippedReviewIds(); return refreshAll(); });
     $("save").addEventListener("click", saveSelected);
     $("accept-review").addEventListener("click", acceptSelected);
     $("skip-review").addEventListener("click", skipSelected);
@@ -1076,6 +1109,7 @@ INDEX_HTML = r"""<!doctype html>
     $("bulk-archive").addEventListener("click", () => bulkUpdateSelected("archive"));
     $("bulk-category-apply").addEventListener("click", () => bulkUpdateSelected("category"));
     $("settings").addEventListener("click", openSettingsDialog);
+    $("settings-close").addEventListener("click", closeSettingsDialog);
     $("settings-cancel").addEventListener("click", closeSettingsDialog);
     $("settings-add-category").addEventListener("click", addSettingsCategory);
     $("settings-find-models").addEventListener("click", findOllamaModels);
@@ -1085,7 +1119,10 @@ INDEX_HTML = r"""<!doctype html>
     $("ai-run").addEventListener("click", runAiClassify);
     $("open").addEventListener("click", () => { if (state.selected) window.open(state.selected.url, "_blank", "noopener"); });
 
-    Promise.all([loadSettings(), loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]).catch(error => {
+    Promise.all([loadSettings(), loadCategories(), loadSyncStatus(), loadReviewSummary(), loadItems()]).then(([, , summary]) => {
+      state.lastSyncKey = syncKey(summary);
+      window.setInterval(pollExternalChanges, 5000);
+    }).catch(error => {
       sync.textContent = error.message;
     });
   </script>

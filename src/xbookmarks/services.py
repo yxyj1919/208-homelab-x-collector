@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -356,7 +358,7 @@ class BookmarkService:
             )
             self.store.set_sync_state(
                 "chrome-extension.result_count",
-                str(result.unique_seen),
+                str(_summary_int(payload, "unique", result.unique_seen)),
             )
             self.store.finish_run(
                 run_id,
@@ -465,7 +467,7 @@ def extension_bookmark(record: dict[str, Any]) -> Bookmark | None:
     url = _text(record.get("url")) or f"https://x.com/i/status/{tweet_id}"
     author_value = record.get("author")
     author = _extension_author_text(author_value)
-    created_at = _text(record.get("created_at"))
+    created_at = _normalize_created_at(_text(record.get("created_at")))
     return Bookmark(
         tweet_id=tweet_id,
         url=url,
@@ -708,6 +710,20 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_created_at(value: str) -> str | None:
+    if not value:
+        return None
+    if "T" in value:
+        return value
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _blank_to_none(value: str | None) -> str | None:

@@ -20,12 +20,14 @@ saveButton.addEventListener("click", async () => {
   await chrome.storage.local.set({ apiBaseUrl: value });
   input.value = value;
   showMessage("Saved.");
+  closeOptionsPageSoon();
 });
 
 resetButton.addEventListener("click", async () => {
   await chrome.storage.local.set({ apiBaseUrl: DEFAULT_API_BASE_URL });
   input.value = DEFAULT_API_BASE_URL;
   showMessage("Reset to default.");
+  closeOptionsPageSoon();
 });
 
 function isValidLocalUrl(value) {
@@ -49,4 +51,8 @@ function normalizeBaseUrl(value) {
 function showMessage(text, isError = false) {
   message.textContent = text;
   message.classList.toggle("error", isError);
+}
+
+function closeOptionsPageSoon() {
+  window.setTimeout(() => window.close(), 500);
 }

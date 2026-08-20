@@ -804,11 +804,18 @@ class BookmarkStore:
                 JOIN bookmarks AS b ON b.tweet_id = bookmarks_fts.tweet_id
             """
             rank_sql = "bm25(bookmarks_fts) AS rank,"
-            order_sql = "rank, COALESCE(b.created_at, b.imported_at) DESC, b.tweet_id DESC"
+            order_sql = (
+                "rank, "
+                "CASE WHEN b.tweet_id GLOB '[0-9]*' THEN CAST(b.tweet_id AS INTEGER) END DESC, "
+                "COALESCE(b.created_at, b.imported_at) DESC, b.tweet_id DESC"
+            )
         else:
             from_sql = "bookmarks AS b"
             rank_sql = ""
-            order_sql = "COALESCE(b.created_at, b.imported_at) DESC, b.tweet_id DESC"
+            order_sql = (
+                "CASE WHEN b.tweet_id GLOB '[0-9]*' THEN CAST(b.tweet_id AS INTEGER) END DESC, "
+                "COALESCE(b.created_at, b.imported_at) DESC, b.tweet_id DESC"
+            )
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.extend([limit, offset])

@@ -873,6 +873,33 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(by_pending, [])
         self.assertEqual([row["tweet_id"] for row in by_query], ["9001"])
 
+    def test_list_bookmarks_orders_x_items_newest_first(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            store.upsert_bookmarks(
+                [
+                    Bookmark(
+                        tweet_id="1702095059762483693",
+                        url="https://x.com/example/status/1702095059762483693",
+                        text="Older bookmark",
+                        created_at="Wed Sep 13 23:01:00 +0000 2023",
+                    ),
+                    Bookmark(
+                        tweet_id="1965750255825326153",
+                        url="https://x.com/example/status/1965750255825326153",
+                        text="Newer bookmark",
+                        created_at="Wed Sep 10 12:12:37 +0000 2025",
+                    ),
+                ]
+            )
+
+            rows = store.list_bookmarks()
+
+        self.assertEqual(
+            [row["tweet_id"] for row in rows],
+            ["1965750255825326153", "1702095059762483693"],
+        )
+
     def test_new_and_low_confidence_bookmarks_enter_review_queue(self) -> None:
         with TemporaryDirectory() as temp_dir:
             store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
@@ -1149,6 +1176,29 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(item["author"], "k8s_notes")
         self.assertEqual(item["author_profile"]["screen_name"], "k8s_notes")
 
+    def test_bookmark_service_normalizes_extension_twitter_dates(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
+            service = BookmarkService(store)
+
+            service.import_extension_bookmarks(
+                {
+                    "source": "chrome-extension-graphql",
+                    "export_html": False,
+                    "items": [
+                        {
+                            "tweet_id": "1965750255825326153",
+                            "url": "https://x.com/i/status/1965750255825326153",
+                            "full_text": "Newer bookmark",
+                            "created_at": "Wed Sep 10 12:12:37 +0000 2025",
+                        },
+                    ],
+                }
+            )
+            item = service.list_bookmarks()["items"][0]
+
+        self.assertEqual(item["created_at"], "2025-09-10T12:12:37Z")
+
     def test_bookmark_service_allows_final_graphql_export_summary(self) -> None:
         with TemporaryDirectory() as temp_dir:
             store = BookmarkStore(Path(temp_dir) / "bookmarks.sqlite")
@@ -1182,13 +1232,16 @@ class PipelineTest(unittest.TestCase):
                 }
             )
             status = service.sync_status()["summary"]
+            state = store.sync_state()
 
         self.assertEqual(result["total_seen"], 101)
+        self.assertEqual(result["unique_seen"], 101)
         self.assertEqual(result["classified"], 78)
         self.assertEqual(status["source_count"], 101)
         self.assertEqual(status["updated"], 99)
         self.assertEqual(status["classified"], 78)
         self.assertEqual(status["exported"], 1)
+        self.assertEqual(state["chrome-extension.result_count"], "101")
 
     def test_bookmark_service_exposes_xarchive_rich_fields(self) -> None:
         with TemporaryDirectory() as temp_dir:
