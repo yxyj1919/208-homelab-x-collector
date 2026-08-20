@@ -8,4 +8,6 @@ venv/
 data/
 archive/
 archive-*/
+obsidian-archive/
+config/settings.json
 real-bookmarks.json
